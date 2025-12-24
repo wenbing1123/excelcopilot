@@ -4,14 +4,10 @@
   "description": "",
   "private": true,
   "type": "module",
-  "main": "src/electron/main.cjs",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview",
-    "dev:electron": "node src/electron/electron-dev.cjs",
-    "build:electron": "vite build",
-    "dist:win": "npm run build:electron && electron-builder --win"
+    "preview": "vite preview"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
@@ -21,28 +17,6 @@
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.2.0",
-    "electron": "^37.2.6",
-    "electron-builder": "^26.0.12",
-    "electronmon": "^2.0.3",
-    "vite": "^6.0.0",
-    "wait-on": "^7.2.0"
-  },
-  "build": {
-    "appId": "com.sheetnext.desktop",
-    "productName": "SheetNext Desktop",
-    "directories": {
-      "output": "release"
-    },
-    "files": [
-      "dist/**/*",
-      "src/electron/**/*",
-      "package.json"
-    ],
-    "asar": true,
-    "win": {
-      "target": [
-        "nsis"
-      ]
-    }
+    "vite": "^6.0.0"
   }
 }
