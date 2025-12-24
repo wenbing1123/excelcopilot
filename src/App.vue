@@ -334,6 +334,13 @@ onMounted(() => {
   if (!el) return;
   sn.value = new SheetNext(el);
 
+  // Dev helper: expose instance for console debugging / tool verification
+  try {
+    window.__sn = sn.value;
+  } catch {
+    // ignore
+  }
+
   // Disable built-in AI chat behavior at the source
   disableSheetNextBuiltInAiChatToggle();
 
@@ -363,6 +370,10 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .layout {
+  /* ensure CSS vars exist for tooling/build analyzers */
+  --rail-width: 36px;
+  --panel-width: 420px;
+
   width: 100vw;
   height: 100vh;
   display: grid;

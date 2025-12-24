@@ -73,7 +73,7 @@ function normalizeBaseUrl(url) {
  * Minimal Chat Completions caller.
  * Uses OpenAI-compatible schema (works for OpenAI & many providers).
  */
-export async function chatCompletion({ provider, config, messages, signal }) {
+export async function chatCompletion({ provider, config, messages, tools, toolChoice, signal }) {
   const defaults = getProviderDefaults(provider);
   const baseUrl = normalizeBaseUrl(config?.baseUrl) || defaults.baseUrl;
   const apiKey = config?.apiKey || '';
@@ -92,17 +92,21 @@ export async function chatCompletion({ provider, config, messages, signal }) {
 
   const endpoint = `${baseUrl}/chat/completions`;
 
+  const body = {
+    model: modelName,
+    messages,
+    stream: false,
+  };
+  if (Array.isArray(tools) && tools.length) body.tools = tools;
+  if (toolChoice) body.tool_choice = toolChoice;
+
   const res = await fetch(endpoint, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${apiKey}`,
     },
-    body: JSON.stringify({
-      model: modelName,
-      messages,
-      stream: false,
-    }),
+    body: JSON.stringify(body),
     signal,
   });
 
@@ -114,10 +118,14 @@ export async function chatCompletion({ provider, config, messages, signal }) {
   }
 
   const data = await res.json();
-  const content = data?.choices?.[0]?.message?.content;
+  const msg = data?.choices?.[0]?.message;
+  const content = msg?.content;
+  const toolCalls = msg?.tool_calls;
   return {
     raw: data,
-    content: typeof content === 'string' ? content : JSON.stringify(data),
+    content: typeof content === 'string' ? content : (content == null ? '' : String(content)),
+    toolCalls: Array.isArray(toolCalls) ? toolCalls : null,
+    finishReason: data?.choices?.[0]?.finish_reason,
   };
 }
 
@@ -130,7 +138,7 @@ function parseSseLines(buffer) {
  * Stream chat completions (OpenAI-compatible SSE).
  * Calls onDelta(text) for each incremental token.
  */
-export async function chatCompletionStream({ provider, config, messages, signal, onDelta }) {
+export async function chatCompletionStream({ provider, config, messages, tools, toolChoice, signal, onDelta }) {
   const defaults = getProviderDefaults(provider);
   const baseUrl = normalizeBaseUrl(config?.baseUrl) || defaults.baseUrl;
   const apiKey = config?.apiKey || '';
@@ -149,17 +157,21 @@ export async function chatCompletionStream({ provider, config, messages, signal,
 
   const endpoint = `${baseUrl}/chat/completions`;
 
+  const body = {
+    model: modelName,
+    messages,
+    stream: true,
+  };
+  if (Array.isArray(tools) && tools.length) body.tools = tools;
+  if (toolChoice) body.tool_choice = toolChoice;
+
   const res = await fetch(endpoint, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${apiKey}`,
     },
-    body: JSON.stringify({
-      model: modelName,
-      messages,
-      stream: true,
-    }),
+    body: JSON.stringify(body),
     signal,
   });
 
@@ -173,10 +185,11 @@ export async function chatCompletionStream({ provider, config, messages, signal,
   if (!res.body) {
     // Fallback: some environments/providers disable stream
     const data = await res.json();
-    const content = data?.choices?.[0]?.message?.content;
+    const msg = data?.choices?.[0]?.message;
+    const content = msg?.content;
     const full = typeof content === 'string' ? content : JSON.stringify(data);
     onDelta?.(full);
-    return { raw: data, content: full };
+    return { raw: data, content: full, toolCalls: Array.isArray(msg?.tool_calls) ? msg.tool_calls : null };
   }
 
   const reader = res.body.getReader();
@@ -213,6 +226,7 @@ export async function chatCompletionStream({ provider, config, messages, signal,
             fullText += delta;
             onDelta?.(delta);
           }
+          // Note: tool_calls streaming deltas are provider-specific; we ignore them in MVP.
         } catch {
           // ignore malformed JSON lines
         }
@@ -220,5 +234,5 @@ export async function chatCompletionStream({ provider, config, messages, signal,
     }
   }
 
-  return { raw: null, content: fullText };
+  return { raw: null, content: fullText, toolCalls: null };
 }

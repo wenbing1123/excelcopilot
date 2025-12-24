@@ -163,7 +163,30 @@
           </template>
 
           <template v-else-if="settingsSection === 'tools'">
-            <el-alert type="info" show-icon :closable="false" title="工具配置（占位）后续可放 sheet 工具、文件检索工具等" />
+            <el-alert
+              type="info"
+              show-icon
+              :closable="false"
+              title="工具配置：选择本次对话中可用的工具"
+              style="margin-bottom: 12px"
+            />
+
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom: 10px">
+              <el-switch v-model="toolsEnableAll" active-text="全部启用" inactive-text="自定义" />
+              <el-button size="small" @click="selectAllTools" :disabled="toolsEnableAll">全选</el-button>
+              <el-button size="small" @click="clearAllTools" :disabled="toolsEnableAll">全不选</el-button>
+            </div>
+
+            <el-checkbox-group v-model="selectedToolNames" :disabled="toolsEnableAll">
+              <div style="display:flex; flex-direction:column; gap:8px">
+                <el-checkbox v-for="t in sheetToolDefinitions" :key="t.name" :label="t.name">
+                  <div style="display:flex; flex-direction:column">
+                    <div style="font-weight:600">{{ t.label }}</div>
+                    <div style="color: var(--el-text-color-secondary); font-size:12px">{{ t.desc }}</div>
+                  </div>
+                </el-checkbox>
+              </div>
+            </el-checkbox-group>
           </template>
 
           <template v-else-if="settingsSection === 'memory'">
@@ -221,36 +244,20 @@
         <!-- context summary (above input) -->
         <div class="context context--inline">
           <div class="context__left">
-            <el-tooltip content="当前 Sheet" placement="top" :disabled="contextScope !== 'sheet'">
-              <el-button
-                size="small"
-                :type="contextScope === 'sheet' ? 'primary' : 'default'"
-                plain
-                circle
-                @click="contextScope = 'sheet'"
-                aria-label="上下文：当前 Sheet"
-              >
-                <el-icon><Document /></el-icon>
-              </el-button>
-            </el-tooltip>
-
-            <el-tooltip content="整个 Excel" placement="top" :disabled="contextScope !== 'workbook'">
-              <el-button
-                size="small"
-                :type="contextScope === 'workbook' ? 'primary' : 'default'"
-                plain
-                circle
-                @click="contextScope = 'workbook'"
-                aria-label="上下文：整个 Excel"
-              >
-                <el-icon><Folder /></el-icon>
-              </el-button>
-            </el-tooltip>
-
-            <div class="context__current">
-              <el-text type="info" size="small">当前选择：</el-text>
-              <el-tag size="small" effect="plain" type="info">（占位）暂无 selection API</el-tag>
-            </div>
+             <div class="context__current">
+               <el-text type="info" size="small">当前选择：</el-text>
+               <el-tag size="small" effect="plain" type="info">Sheet：{{ targetSheetName || '(未知)' }}</el-tag>
+               <el-tag size="small" effect="plain" type="info">Cell：{{ anchorCell || 'A1' }}</el-tag>
+               <el-button size="small" plain @click="refreshAnchorFromSelection">同步选区</el-button>
+               <el-tooltip content="锁定后：即使模型想写入/创建其他工作表，也会强制写在当前活动工作表" placement="top">
+                 <el-switch
+                   v-model="lockToActiveSheet"
+                   size="small"
+                   active-text="锁定当前Sheet"
+                   inactive-text="允许切换"
+                 />
+               </el-tooltip>
+             </div>
           </div>
 
           <div class="context__right">
@@ -277,16 +284,24 @@
             </el-select>
 
             <!-- 配置名（取代原“模型”provider） -->
-            <el-select
-              v-model="activeConfigId"
-              size="small"
-              class="model"
-              placeholder="配置"
-              filterable
-              :loading="configsLoading"
-            >
-              <el-option v-for="c in llmConfigs" :key="c.id" :label="c.name" :value="c.id" />
-            </el-select>
+            <div style="display:flex; align-items:center; gap:6px">
+              <el-select
+                v-model="activeConfigId"
+                size="small"
+                class="model"
+                placeholder="配置"
+                filterable
+                :loading="configsLoading"
+              >
+                <el-option v-for="c in llmConfigs" :key="c.id" :label="c.name" :value="c.id" />
+              </el-select>
+
+              <el-tooltip content="工具" placement="top">
+                <el-button size="small" circle plain @click="toolDialogOpen = true" aria-label="工具">
+                  <el-icon><Tools /></el-icon>
+                </el-button>
+              </el-tooltip>
+            </div>
 
             <el-text v-if="mode === '编辑'" type="warning" size="small" class="edit-hint">
               help / set A1 1 / read A1
@@ -304,21 +319,50 @@
         </div>
       </div>
     </footer>
+
+    <!-- Tools dialog (per-conversation tool enable/disable) -->
+    <el-dialog v-model="toolDialogOpen" title="工具" width="640px" :close-on-click-modal="false">
+      <el-alert
+        type="info"
+        show-icon
+        :closable="false"
+        title="默认：当前对话启用全部工具。你可以在这里禁用某些工具（例如不允许创建工作表）。"
+        style="margin-bottom: 12px"
+      />
+
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom: 10px">
+        <el-switch v-model="toolsEnableAll" active-text="全部启用" inactive-text="自定义" />
+        <el-button size="small" @click="selectAllTools" :disabled="toolsEnableAll">全选</el-button>
+        <el-button size="small" @click="clearAllTools" :disabled="toolsEnableAll">全不选</el-button>
+      </div>
+
+      <el-checkbox-group v-model="selectedToolNames" :disabled="toolsEnableAll">
+        <div style="display:flex; flex-direction:column; gap:8px">
+          <el-checkbox v-for="t in sheetToolDefinitions" :key="t.name" :label="t.name">
+            <div style="display:flex; flex-direction:column">
+              <div style="font-weight:600">{{ t.label }}</div>
+              <div style="color: var(--el-text-color-secondary); font-size:12px">{{ t.desc }}</div>
+            </div>
+          </el-checkbox>
+        </div>
+      </el-checkbox-group>
+
+      <template #footer>
+        <div style="display:flex; justify-content:flex-end; gap:8px">
+          <el-button @click="toolDialogOpen = false">关闭</el-button>
+          <el-button type="primary" @click="confirmToolsDialog">确定</el-button>
+        </div>
+      </template>
+    </el-dialog>
   </aside>
 </template>
 
 <script setup>
 import { ref, computed, nextTick, watch, reactive, onMounted } from 'vue';
-import { Document, Folder, Delete } from '@element-plus/icons-vue';
+import { Delete, Tools } from '@element-plus/icons-vue';
 import { getProviderDefaults, chatCompletion, chatCompletionStream, PROVIDERS } from '../services/llmClient.js';
 import { listLlmConfigs, createLlmConfig, updateLlmConfig, deleteLlmConfig } from '../services/llmConfigApi.js';
-import {
-  getRecentConversation,
-  listConversations as apiListConversations,
-  getConversationMessages,
-  createConversation,
-  saveConversation,
-} from '../services/conversationApi.js';
+import { listConversations as apiListConversations, getConversationMessages } from '../services/conversationApi.js';
 import {
   listSystemPrompts,
   createSystemPrompt,
@@ -327,480 +371,95 @@ import {
   getActiveSystemPrompt,
   setActiveSystemPrompt,
 } from '../services/systemPromptApi.js';
-import { buildDebugPrompt } from '../services/debugPrompt.js';
+import { getSheetTools } from '../services/sheetTools.js';
+import { loadToolSettings, saveToolSettings } from '../services/toolSettings.js';
 
-// SheetNext 实例（由 App.vue 传入）
+// NOTE: This file previously accumulated duplicated state blocks.
+// We keep ONE set of state & functions below.
+
+// ---------- Topbar dialogs/events ----------
+const settingsOpen = ref(false);
+const settingsSection = ref('general');
+const emit = defineEmits(['open-history']);
+
+function openSettings() {
+  settingsOpen.value = true;
+  settingsSection.value = 'general';
+}
+
+function openHistory() {
+  emit('open-history');
+}
+
+// ---------- SheetNext instance ----------
 const props = defineProps({
   sheet: { type: Object, default: null },
   cockpitId: { type: String, default: '' },
 });
-
 const hasSheet = computed(() => !!props.sheet);
 
-// 基础聊天状态（之前缺失导致 messages is not defined 白屏）
+// ---------- Basic chat state ----------
 const draft = ref('');
 const messages = ref([]);
-
 const scrollbarRef = ref(null);
 const bottomRef = ref(null);
 
-// Context scope (placeholder: sheet/workbook)
-const contextScope = ref('sheet');
-
-const serverStatus = ref('');
-
-const pickedHint = computed(() => {
-  return serverStatus.value || '配置服务：未连接';
-});
-
-// 模式顺序：提问、编辑、智能体、计划
+// ---------- Modes ----------
 const modes = ['提问', '编辑', '智能体', '计划'];
 const mode = ref(modes[0]);
-
-// 调试：打印本次请求的完整提示词（仅开发使用）
+const requesting = ref(false);
 const showPromptDebug = ref(false);
 
-const settingsOpen = ref(false);
-const settingsSection = ref('general');
+// ---------- Context (anchor) ----------
+const targetSheetName = ref('');
+const anchorCell = ref('A1');
+const lockToActiveSheet = ref(true);
+const pickedHint = computed(() => {
+  return hasSheet.value
+    ? `目标：${targetSheetName.value || '(活动表)'}!${anchorCell.value || 'A1'}`
+    : 'SheetNext 未就绪';
+});
 
+function refreshAnchorFromSelection() {
+  // MVP: best-effort; if sheetnext exposes activeSheet/activeCell use it, else keep defaults.
+  try {
+    const s = props.sheet?.activeSheet;
+    if (s?.name) targetSheetName.value = s.name;
+    const cell = s?.activeCell;
+    if (cell && typeof cell === 'object') {
+      // cell like {r,c}
+      // we don't have a reliable num->A1 here; keep A1.
+    }
+  } catch {
+    // ignore
+  }
+}
+
+// ---------- Provider/model configs ----------
 const providerDefaults = {
   [PROVIDERS.GPT]: getProviderDefaults(PROVIDERS.GPT),
   [PROVIDERS.DEEPSEEK]: getProviderDefaults(PROVIDERS.DEEPSEEK),
   [PROVIDERS.DOUBAO]: getProviderDefaults(PROVIDERS.DOUBAO),
 };
-
-// providers list for model config UI
 const models = [PROVIDERS.GPT, PROVIDERS.DEEPSEEK, PROVIDERS.DOUBAO];
 
-function openSettings() {
-  settingsOpen.value = true;
-  // 默认进入通用设置，方便看到系统提示词/调试开关
-  settingsSection.value = 'general';
-}
-
-const emit = defineEmits(['open-history']);
-
-defineExpose({
-  openSettings,
-  // 下面这些给 App 的“历史对话弹窗”用
-  listConversations,
-  loadConversationById,
-  newConversation,
-  saveCurrentConversation,
-});
-
-
-// 滚动到底部：放在 messages 定义之后
-watch(
-  () => messages.value.length,
-  async () => {
-    await nextTick();
-    bottomRef.value?.scrollIntoView({ block: 'end' });
-  },
-);
-
-function tagType(role) {
-  if (role === 'user') return 'primary';
-  if (role === 'assistant') return 'success';
-  if (role === 'system') return 'info';
-  return 'info';
-}
-
-function formatTime(ts) {
-  try {
-    return new Date(ts).toLocaleString();
-  } catch {
-    return '';
-  }
-}
-
-function saveConfig() {
-  // 兼容旧 footer 的“保存”按钮：保存到 SQLite
-  return saveConfigDb();
-}
-
-function resetConfig() {
-  // 重置为新建
-  return newConfig();
-}
-
-const requesting = ref(false);
-let abortController = null;
+const llmConfigs = ref([]);
+const activeConfigId = ref(null);
+const configsLoading = ref(false);
+const editingConfig = reactive({ id: null, name: '', provider: PROVIDERS.GPT, baseUrl: '', apiKey: '', modelName: '' });
 
 const activeConfigLabel = computed(() => {
   const c = llmConfigs.value.find((x) => x.id === activeConfigId.value);
   return c?.name || '未选择配置';
 });
 
-// 让发送时展示更友好（显示 provider + modelName）
-const activeModelHint = computed(() => {
-  const c = llmConfigs.value.find((x) => x.id === activeConfigId.value);
-  if (!c) return '';
-  const p = c.provider;
-  const defaults = providerDefaults[p] || { model: '' };
-  const mn = c.modelName || defaults.model;
-  return `${p}${mn ? ' / ' + mn : ''}`;
-});
-
-onMounted(() => {
-  refreshConfigs();
-  loadRecentConversation();
-  // 加载系统提示词（用于注入 system message）
-  refreshSystemPrompts();
-});
-
-async function send() {
-  const content = draft.value.trim();
-  if (!content) return;
-
-  const scopeLabel = contextScope.value === 'workbook' ? '整个Excel' : '当前Sheet';
-
-  const userId = crypto.randomUUID?.() ?? String(Date.now());
-  const userMsg = {
-    id: userId,
-    role: 'user',
-    createdAt: Date.now(),
-    content,
-    meta: {
-      mode: mode.value,
-      configName: activeConfigLabel.value,
-      modelHint: activeModelHint.value,
-      contextScope: contextScope.value,
-      contextLabel: scopeLabel,
-    },
-  };
-  messages.value.push(userMsg);
-
-  // 如果当前还没有会话记录（新建会话后的第一次发言），先创建会话并用首条 user 生成标题
-  if (!activeConversationId.value) {
-    const title = deriveTitleFromMessages(messages.value);
-    if (title) {
-      const created = await createConversation(title);
-      activeConversationId.value = created?.id ?? null;
-    }
-  }
-
-  // 先把 user 消息保存进库（这样“最近会话”至少有内容）
-  try {
-    await saveCurrentConversation();
-  } catch {
-    // ignore
-  }
-
-  if (mode.value === '编辑') {
-    handleEditCommand(content);
-    draft.value = '';
-    return;
-  }
-
-  draft.value = '';
-
-  const selected = llmConfigs.value.find((c) => c.id === activeConfigId.value);
-  if (!selected) {
-    messages.value.push({
-      id: crypto.randomUUID?.() ?? String(Date.now() + 2),
-      role: 'system',
-      createdAt: Date.now(),
-      content: '未选择任何模型配置：请先在 设置 -> 模型设置 中创建/选择配置。',
-    });
-    return;
-  }
-
-  const assistantId = crypto.randomUUID?.() ?? String(Date.now() + 1);
-  messages.value.push({
-    id: assistantId,
-    role: 'assistant',
-    createdAt: Date.now(),
-    content: '正在思考…',
-  });
-
-  try {
-    requesting.value = true;
-    abortController?.abort?.();
-    abortController = new AbortController();
-
-    const provider = selected.provider;
-
-    const providerCfg = {
-      apiKey: selected.apiKey,
-      baseUrl: selected.baseUrl,
-      modelName: selected.modelName,
-    };
-
-    const inputMessages = messages.value
-      .filter((m) => m.id !== assistantId) // 排除占位
-      .filter((m) => m.role === 'user' || m.role === 'assistant')
-      .map((m) => ({ role: m.role, content: m.content }));
-
-    // 注入系统提示词（system prompt）作为第一条 system message
-    const fallbackPromptId = activeSystemPromptId.value ?? systemPrompts.value[0]?.id ?? null;
-    const sysPrompt = systemPrompts.value.find((p) => p.id === fallbackPromptId);
-    const sysText = String(sysPrompt?.content || '').trim();
-    const finalMessages = sysText
-      ? [{ role: 'system', content: sysText }, ...inputMessages]
-      : inputMessages;
-
-    // Debug: 在控制台输出本次实际发送的完整 messages
-    const defaults = providerDefaults[provider] || { baseUrl: '', model: '' };
-    const debugPayload = buildDebugPrompt({
-      provider,
-      baseUrl: providerCfg.baseUrl || defaults.baseUrl,
-      modelName: providerCfg.modelName || defaults.model,
-      messages: finalMessages,
-    });
-    if (showPromptDebug.value) {
-      console.log('[LLM DEBUG] request payload:', debugPayload);
-    } else {
-      console.log('[LLM DEBUG] system prompt:', sysText ? `ON (${sysText.slice(0, 40)}${sysText.length > 40 ? '…' : ''})` : 'OFF');
-    }
-
-    const idx = messages.value.findIndex((m) => m.id === assistantId);
-    if (idx >= 0) {
-      messages.value[idx] = {
-        ...messages.value[idx],
-        createdAt: Date.now(),
-        content: '',
-      };
-    }
-
-    // 流式：每次增量都追加到同一条 assistant 消息
-    const appendDelta = async (delta) => {
-      if (!delta) return;
-      const i = messages.value.findIndex((m) => m.id === assistantId);
-      if (i < 0) return;
-      messages.value[i] = {
-        ...messages.value[i],
-        content: (messages.value[i].content || '') + delta,
-      };
-      await nextTick();
-      bottomRef.value?.scrollIntoView({ block: 'end' });
-    };
-
-    try {
-      await chatCompletionStream({
-        provider,
-        config: providerCfg,
-        messages: finalMessages,
-        signal: abortController.signal,
-        onDelta: (d) => {
-          // 做“逐字”效果：把 token 再拆成字符按微任务写入
-          const chars = String(d || '').split('');
-          for (const ch of chars) {
-            // 不 await，避免阻塞解析；用 microtask 排队
-            Promise.resolve().then(() => appendDelta(ch));
-          }
-        },
-      });
-
-      // 流式结束后保存（assistant 回复入库）
-      try {
-        await saveCurrentConversation();
-      } catch {
-        // ignore
-      }
-    } catch (streamErr) {
-      // 回退：非流式一次性
-      const resp = await chatCompletion({
-        provider,
-        config: providerCfg,
-        messages: finalMessages,
-        signal: abortController.signal,
-      });
-      const i = messages.value.findIndex((m) => m.id === assistantId);
-      if (i >= 0) {
-        messages.value[i] = {
-          ...messages.value[i],
-          createdAt: Date.now(),
-          content: resp.content,
-        };
-      }
-
-      // 非流式完成后保存
-      try {
-        await saveCurrentConversation();
-      } catch {
-        // ignore
-      }
-    }
-  } catch (e) {
-    const idx = messages.value.findIndex((m) => m.id === assistantId);
-    const errText = `请求失败：${e?.message ?? String(e)}`;
-    if (idx >= 0) {
-      messages.value[idx] = {
-        ...messages.value[idx],
-        role: 'system',
-        createdAt: Date.now(),
-        content: errText,
-      };
-    } else {
-      messages.value.push({
-        id: crypto.randomUUID?.() ?? String(Date.now() + 2),
-        role: 'system',
-        createdAt: Date.now(),
-        content: errText,
-      });
-    }
-  } finally {
-    requesting.value = false;
-  }
-}
-
-function pushAssistant(text) {
-  messages.value.push({
-    id: crypto.randomUUID?.() ?? String(Date.now() + Math.random()),
-    role: 'assistant',
-    createdAt: Date.now(),
-    content: text,
-  });
-}
-
-function clear() {
-  messages.value = [];
-  draft.value = '';
-}
-
-function handleEditCommand(input) {
-  if (!hasSheet.value) {
-    pushAssistant('SheetNext 尚未初始化完成，稍等片刻再试。');
-    return;
-  }
-
-  const trimmed = input.trim();
-  if (trimmed === 'help' || trimmed === '帮助') {
-    pushAssistant(
-      [
-        '编辑模式指令（MVP）:',
-        '- help',
-        '- set A1 123',
-        '- set A1 "hello"',
-        '- read A1',
-      ].join('\n'),
-    );
-    return;
-  }
-
-  const mSet = trimmed.match(/^set\s+([A-Za-z]+\d+)\s+(.+)$/);
-  if (mSet) {
-    const addr = mSet[1].toUpperCase();
-    const raw = mSet[2].trim();
-    const value = parseValue(raw);
-
-    try {
-      const ok = trySetCell(props.sheet, addr, value);
-      pushAssistant(ok ? `已尝试写入 ${addr} = ${JSON.stringify(value)}` : `未找到可用的写入接口，无法写入 ${addr}`);
-    } catch (e) {
-      pushAssistant(`写入失败：${e?.message ?? String(e)}`);
-    }
-    return;
-  }
-
-  const mRead = trimmed.match(/^read\s+([A-Za-z]+\d+)$/);
-  if (mRead) {
-    const addr = mRead[1].toUpperCase();
-    try {
-      const res = tryReadCell(props.sheet, addr);
-      pushAssistant(res.found ? `${addr} = ${JSON.stringify(res.value)}` : `未找到可用的读取接口，无法读取 ${addr}`);
-    } catch (e) {
-      pushAssistant(`读取失败：${e?.message ?? String(e)}`);
-    }
-    return;
-  }
-
-  pushAssistant('未识别的编辑指令。输入 help 查看可用指令。');
-}
-
-function parseValue(raw) {
-  if ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"))) {
-    return raw.slice(1, -1);
-  }
-  if (raw === 'true') return true;
-  if (raw === 'false') return false;
-  if (raw === 'null') return null;
-  const n = Number(raw);
-  if (!Number.isNaN(n) && raw !== '') return n;
-  return raw;
-}
-
-function trySetCell(sheet, addr, value) {
-  const candidates = [
-    sheet?.setCellValue,
-    sheet?.setValue,
-    sheet?.setCell,
-    sheet?.set,
-    sheet?.api?.setCellValue,
-    sheet?.api?.setValue,
-    sheet?.api?.setCell,
-  ];
-
-  for (const fn of candidates) {
-    if (typeof fn === 'function') {
-      fn.call(sheet?.api ?? sheet, addr, value);
-      return true;
-    }
-  }
-
-  const dispatch = sheet?.dispatch || sheet?.command || sheet?.api?.dispatch;
-  if (typeof dispatch === 'function') {
-    dispatch.call(sheet, { type: 'setCell', addr, value });
-    return true;
-  }
-
-  return false;
-}
-
-function tryReadCell(sheet, addr) {
-  const candidates = [
-    sheet?.getCellValue,
-    sheet?.getValue,
-    sheet?.getCell,
-    sheet?.get,
-    sheet?.api?.getCellValue,
-    sheet?.api?.getValue,
-    sheet?.api?.getCell,
-  ];
-
-  for (const fn of candidates) {
-    if (typeof fn === 'function') {
-      return { found: true, value: fn.call(sheet?.api ?? sheet, addr) };
-    }
-  }
-
-  return { found: false, value: undefined };
-}
-
-const llmConfigs = ref([]);
-const activeConfigId = ref(null);
-const editingConfig = reactive({ id: null, name: '', provider: PROVIDERS.GPT, baseUrl: '', apiKey: '', modelName: '' });
-const configsLoading = ref(false);
-
 async function refreshConfigs() {
   configsLoading.value = true;
   try {
     const rows = await listLlmConfigs();
     llmConfigs.value = Array.isArray(rows) ? rows : [];
-    serverStatus.value = '配置服务：已连接';
-
-    // 如果当前没有选中，则自动选中第一条
-    if (activeConfigId.value == null && llmConfigs.value.length > 0) {
-      activeConfigId.value = llmConfigs.value[0].id;
-    }
-
-    // 同步编辑表单
+    if (activeConfigId.value == null && llmConfigs.value.length) activeConfigId.value = llmConfigs.value[0].id;
     loadEditingFromSelected();
-  } catch (e) {
-    serverStatus.value = '配置服务：未启动';
-    llmConfigs.value = [];
-    activeConfigId.value = null;
-    // 只提示一次，避免刷屏
-    const already = messages.value.some((m) => m.role === 'system' && String(m.content || '').includes('模型配置服务不可用'));
-    if (!already) {
-      messages.value.push({
-        id: crypto.randomUUID?.() ?? String(Date.now()),
-        role: 'system',
-        createdAt: Date.now(),
-        content: `模型配置服务不可用：${e?.message ?? String(e)}`,
-      });
-    }
   } finally {
     configsLoading.value = false;
   }
@@ -816,6 +475,8 @@ function loadEditingFromSelected() {
   editingConfig.apiKey = row.apiKey || '';
   editingConfig.modelName = row.modelName || '';
 }
+
+watch(() => activeConfigId.value, loadEditingFromSelected);
 
 function newConfig() {
   editingConfig.id = null;
@@ -834,37 +495,142 @@ async function saveConfigDb() {
     apiKey: editingConfig.apiKey,
     modelName: editingConfig.modelName,
   };
-
   const saved = editingConfig.id
     ? await updateLlmConfig(editingConfig.id, payload)
     : await createLlmConfig(payload);
-
   await refreshConfigs();
-  if (saved?.id != null) {
-    activeConfigId.value = saved.id;
-  }
-  await refreshConfigs();
-
-  // 保存后关闭弹窗
-  settingsOpen.value = false;
-
-  messages.value.push({
-    id: crypto.randomUUID?.() ?? String(Date.now()),
-    role: 'system',
-    createdAt: Date.now(),
-    content: '模型配置已保存。',
-  });
+  if (saved?.id != null) activeConfigId.value = saved.id;
 }
 
 async function removeSelectedConfig() {
   if (!activeConfigId.value) return;
-
   await deleteLlmConfig(activeConfigId.value);
   activeConfigId.value = null;
   await refreshConfigs();
-  if (!activeConfigId.value) newConfig();
 }
 
+function saveConfig() {
+  return saveConfigDb();
+}
+function resetConfig() {
+  return newConfig();
+}
+
+// ---------- System prompts ----------
+const systemPrompts = ref([]);
+const activeSystemPromptId = ref(null);
+const promptLoading = ref(false);
+const editingPrompt = reactive({ id: null, name: '', content: '' });
+
+async function refreshSystemPrompts() {
+  promptLoading.value = true;
+  try {
+    const rows = await listSystemPrompts();
+    systemPrompts.value = Array.isArray(rows) ? rows : [];
+    const active = await getActiveSystemPrompt().catch(() => null);
+    activeSystemPromptId.value = active?.activeSystemPromptId ?? systemPrompts.value?.[0]?.id ?? null;
+    loadPromptFromSelection();
+  } finally {
+    promptLoading.value = false;
+  }
+}
+
+function loadPromptFromSelection() {
+  const p = systemPrompts.value.find((x) => x.id === activeSystemPromptId.value);
+  if (!p) {
+    editingPrompt.id = null;
+    editingPrompt.name = '';
+    editingPrompt.content = '';
+    return;
+  }
+  editingPrompt.id = p.id;
+  editingPrompt.name = p.name;
+  editingPrompt.content = p.content;
+}
+
+function newPrompt() {
+  editingPrompt.id = null;
+  editingPrompt.name = '';
+  editingPrompt.content = '';
+}
+
+async function savePromptDb() {
+  const payload = { name: editingPrompt.name, content: editingPrompt.content };
+  const saved = editingPrompt.id
+    ? await updateSystemPrompt(editingPrompt.id, payload)
+    : await createSystemPrompt(payload);
+  await refreshSystemPrompts();
+  if (saved?.id != null) activeSystemPromptId.value = saved.id;
+}
+
+async function removePromptDb() {
+  if (!editingPrompt.id) return;
+  await deleteSystemPrompt(editingPrompt.id);
+  await refreshSystemPrompts();
+}
+
+// ---------- Tool config (global) ----------
+const toolDialogOpen = ref(false);
+const toolsEnableAll = ref(true);
+const selectedToolNames = ref([]);
+
+const TOOL_I18N = {
+  sheet_add_sheet: { label: '新建工作表', desc: '在当前工作簿中新增一个工作表（sheet tab）。' },
+  sheet_set_range_values: { label: '写入单元格/区域', desc: '向指定范围写入二维数组（可用于批量生成表格）。' },
+  sheet_get_range_values: { label: '读取单元格/区域', desc: '读取指定范围的值（二维数组）。' },
+  sheet_format_range: { label: '设置格式', desc: '对指定范围应用基础格式（粗体/背景色/对齐/数字格式）。' },
+};
+
+const sheetToolDefinitions = computed(() => {
+  const tools = getSheetTools();
+  return (tools || [])
+    .map((t) => {
+      const name = t?.function?.name;
+      if (!name) return null;
+      const meta = TOOL_I18N[name] || { label: name, desc: t?.function?.description || '' };
+      return { name, label: meta.label, desc: meta.desc };
+    })
+    .filter(Boolean);
+});
+
+const _loadedToolSettings = loadToolSettings();
+toolsEnableAll.value = _loadedToolSettings.enableAll;
+
+watch(
+  () => sheetToolDefinitions.value,
+  (defs) => {
+    if (!defs?.length) return;
+    if (!toolsEnableAll.value && _loadedToolSettings.enabledToolNames?.length) {
+      selectedToolNames.value = [..._loadedToolSettings.enabledToolNames];
+    }
+    if (!selectedToolNames.value.length) selectedToolNames.value = defs.map((d) => d.name);
+  },
+  { immediate: true },
+);
+watch(
+  () => toolsEnableAll.value,
+  () => saveToolSettings({ enableAll: toolsEnableAll.value, enabledToolNames: selectedToolNames.value }),
+);
+watch(
+  () => selectedToolNames.value,
+  () => {
+    if (!toolsEnableAll.value) saveToolSettings({ enableAll: false, enabledToolNames: selectedToolNames.value });
+  },
+  { deep: true },
+);
+
+function selectAllTools() {
+  selectedToolNames.value = sheetToolDefinitions.value.map((d) => d.name);
+}
+function clearAllTools() {
+  selectedToolNames.value = [];
+}
+function confirmToolsDialog() {
+  saveToolSettings({ enableAll: toolsEnableAll.value, enabledToolNames: selectedToolNames.value });
+  toolDialogOpen.value = false;
+}
+
+// ---------- Conversation history methods exposed to App.vue ----------
 const activeConversationId = ref(null);
 
 function mapDbMessageToUi(m) {
@@ -876,46 +642,8 @@ function mapDbMessageToUi(m) {
   };
 }
 
-function normalizeTitle(raw) {
-  const s = String(raw || '').replace(/\s+/g, ' ').trim();
-  if (!s) return '(无标题)';
-  // 截断，避免太长
-  return s.length > 30 ? s.slice(0, 30) + '…' : s;
-}
-
-function deriveTitleFromMessages(msgs) {
-  const firstUser = (msgs || []).find((m) => m?.role === 'user' && String(m?.content || '').trim());
-  if (!firstUser) return '';
-
-  const text = String(firstUser.content || '').trim();
-  return normalizeTitle(text);
-}
-
-async function loadRecentConversation() {
-  try {
-    const rec = await getRecentConversation();
-    if (!rec || !rec.id) {
-      // 没有历史会话就保持空白，不创建占位会话
-      activeConversationId.value = null;
-      messages.value = [];
-      return;
-    }
-
-    activeConversationId.value = rec.id;
-    const data = await getConversationMessages(rec.id);
-    const dbMsgs = Array.isArray(data?.messages) ? data.messages : [];
-    messages.value = dbMsgs.map(mapDbMessageToUi);
-    await nextTick();
-    bottomRef.value?.scrollIntoView({ block: 'end' });
-  } catch (e) {
-    // 不阻断 UI
-    messages.value.push({
-      id: crypto.randomUUID?.() ?? String(Date.now()),
-      role: 'system',
-      createdAt: Date.now(),
-      content: `加载最近会话失败：${e?.message ?? String(e)}`,
-    });
-  }
+async function listConversations() {
+  return apiListConversations();
 }
 
 async function loadConversationById(id) {
@@ -924,183 +652,287 @@ async function loadConversationById(id) {
   const dbMsgs = Array.isArray(data?.messages) ? data.messages : [];
   messages.value = dbMsgs.map(mapDbMessageToUi);
   await nextTick();
-  bottomRef.value?.scrollIntoView({ block: 'end' });
+  bottomRef.value?.scrollIntoView?.({ block: 'end' });
 }
 
-async function saveCurrentConversation() {
-  // 没有任何 user 消 Messages 时，不保存/不创建会话（避免历史里出现无意义记录）
-  let title = deriveTitleFromMessages(messages.value);
-  if (!title) {
-    // 如果已经有会话 id（比如从历史加载来的），允许保存为空内容的更新（比如只剩 assistant/system）
-    if (!activeConversationId.value) return;
-    title = '(无标题)';
+defineExpose({ listConversations, loadConversationById });
+
+// ---------- UI helpers ----------
+function tagType(role) {
+  if (role === 'user') return 'primary';
+  if (role === 'assistant') return 'success';
+  return 'info';
+}
+function formatTime(ts) {
+  try {
+    return new Date(ts).toLocaleString();
+  } catch {
+    return '';
   }
+}
 
-  if (!activeConversationId.value) {
-    const created = await createConversation(title);
-    activeConversationId.value = created?.id ?? null;
-  }
-
-  const payload = {
-    title,
-    messages: messages.value.map((m) => ({ role: m.role, content: m.content })),
-  };
-
-  await saveConversation(activeConversationId.value, payload);
+function clear() {
+  messages.value = [];
+  draft.value = '';
 }
 
 async function newConversation() {
-  // 点击必须“立刻清空 UI”，即便保存失败也不能卡住
-  try {
-    await saveCurrentConversation();
-  } catch (e) {
-    messages.value.push({
-      id: crypto.randomUUID?.() ?? String(Date.now()),
-      role: 'system',
-      createdAt: Date.now(),
-      content: `保存当前会话失败：${e?.message ?? String(e)}`,
-    });
-  } finally {
-    activeConversationId.value = null;
-    messages.value = [];
-    draft.value = '';
-    await nextTick();
-    bottomRef.value?.scrollIntoView({ block: 'end' });
+  activeConversationId.value = null;
+  clear();
+}
+
+// ---------- Sheet tool executor (local, MVP) ----------
+function getActiveSheet() {
+  const s = props.sheet?.activeSheet;
+  return s || null;
+}
+
+function getSheetByName(name) {
+  const wb = props.sheet;
+  if (!wb) return null;
+  const sheets = wb.sheets || wb?.workbook?.sheets;
+  if (Array.isArray(sheets)) return sheets.find((s) => s?.name === name) || null;
+  if (typeof wb.getSheetByName === 'function') return wb.getSheetByName(name);
+  return null;
+}
+
+async function runSheetToolCall(call) {
+  const fn = call?.function;
+  const name = fn?.name;
+  const args = typeof fn?.arguments === 'string' ? JSON.parse(fn.arguments || '{}') : (fn?.arguments || {});
+  const sheet = args.sheet ? getSheetByName(args.sheet) : getActiveSheet();
+  if (!sheet) throw new Error('SheetNext 未就绪或没有活动工作表');
+
+  if (name === 'sheet_add_sheet') {
+    const newName = String(args.name || '').trim();
+    if (!newName) throw new Error('name required');
+    if (typeof props.sheet?.addSheet === 'function') {
+      props.sheet.addSheet(newName);
+      return { ok: true, name: newName };
+    }
+    throw new Error('当前 SheetNext 实例不支持 addSheet');
   }
-}
 
-async function listConversations() {
-  return apiListConversations();
-}
-
-const systemPrompts = ref([]);
-const activeSystemPromptId = ref(null);
-const promptLoading = ref(false);
-const editingPrompt = reactive({ id: null, name: '', content: '' });
-
-async function refreshSystemPrompts() {
-  promptLoading.value = true;
-  try {
-    const rows = await listSystemPrompts();
-    systemPrompts.value = Array.isArray(rows) ? rows : [];
-    const active = await getActiveSystemPrompt();
-    activeSystemPromptId.value = active?.activeSystemPromptId ?? null;
-
-    // 如果后端还没有设置选中项，但本地已有 prompts，则默认选中第一条并持久化
-    if (activeSystemPromptId.value == null && systemPrompts.value.length > 0) {
-      activeSystemPromptId.value = systemPrompts.value[0].id;
-      try {
-        await setActiveSystemPrompt(activeSystemPromptId.value);
-      } catch {
-        // ignore
+  if (name === 'sheet_set_range_values') {
+    const values = args.values;
+    const startCell = args.startCell || args.range;
+    if (!Array.isArray(values) || !startCell) throw new Error('values + (startCell|range) required');
+    if (typeof sheet.insertTable === 'function') {
+      sheet.insertTable(values, startCell, { border: true });
+      return { ok: true };
+    }
+    // fallback: set cell-by-cell
+    if (typeof sheet.rangeStrToNum === 'function' && typeof sheet.getCell === 'function') {
+      const rangeNum = sheet.rangeStrToNum(String(startCell));
+      const r0 = rangeNum?.s?.r ?? 0;
+      const c0 = rangeNum?.s?.c ?? 0;
+      for (let r = 0; r < values.length; r++) {
+        for (let c = 0; c < (values[r] || []).length; c++) {
+          const cell = sheet.getCell(r0 + r, c0 + c);
+          if (cell) cell.v = values[r][c];
+        }
       }
+      return { ok: true };
     }
-
-    // 同步编辑区
-    const row = systemPrompts.value.find((p) => p.id === activeSystemPromptId.value) || systemPrompts.value[0];
-    if (row) {
-      editingPrompt.id = row.id;
-      editingPrompt.name = row.name;
-      editingPrompt.content = row.content;
-    } else {
-      editingPrompt.id = null;
-      editingPrompt.name = '';
-      editingPrompt.content = '';
-    }
-  } catch (e) {
-    messages.value.push({
-      id: crypto.randomUUID?.() ?? String(Date.now()),
-      role: 'system',
-      createdAt: Date.now(),
-      content: `加载系统提示词失败：${e?.message ?? String(e)}`,
-    });
-  } finally {
-    promptLoading.value = false;
+    throw new Error('当前 Sheet 对象不支持写入');
   }
+
+  if (name === 'sheet_get_range_values') {
+    const range = String(args.range || '');
+    if (!range) throw new Error('range required');
+    if (typeof sheet.eachArea === 'function' && typeof sheet.getCell === 'function') {
+      const rn = sheet.rangeStrToNum(range);
+      const out = [];
+      for (let r = rn.s.r; r <= rn.e.r; r++) {
+        const row = [];
+        for (let c = rn.s.c; c <= rn.e.c; c++) {
+          const cell = sheet.getCell(r, c);
+          row.push(cell?.v ?? cell?.showVal ?? '');
+        }
+        out.push(row);
+      }
+      return { values: out };
+    }
+    return { values: [] };
+  }
+
+  if (name === 'sheet_format_range') {
+    // MVP: formatting not implemented in this minimal restore
+    return { ok: true, note: 'format not implemented in MVP' };
+  }
+
+  throw new Error(`unknown tool: ${name}`);
 }
 
-function newPrompt() {
-  editingPrompt.id = null;
-  editingPrompt.name = '';
-  editingPrompt.content = '';
-}
-
-async function savePromptDb() {
-  const payload = {
-    name: editingPrompt.name,
-    content: editingPrompt.content,
-  };
-
-  const saved = editingPrompt.id
-    ? await updateSystemPrompt(editingPrompt.id, payload)
-    : await createSystemPrompt(payload);
-
-  await refreshSystemPrompts();
-  if (saved?.id != null) {
-    activeSystemPromptId.value = saved.id;
-    // 关键：把选中项持久化到 app_settings，避免刷新/重开后丢失
-    try {
-      await setActiveSystemPrompt(saved.id);
-    } catch {
-      // ignore
-    }
-  }
-  await refreshSystemPrompts();
-
+function pushSystem(content) {
   messages.value.push({
     id: crypto.randomUUID?.() ?? String(Date.now()),
     role: 'system',
     createdAt: Date.now(),
-    content: '系统提示词已保存。',
+    content,
   });
 }
 
-async function removePromptDb() {
-  if (!editingPrompt.id) return;
-
-  await deleteSystemPrompt(editingPrompt.id);
-  editingPrompt.id = null;
-  await refreshSystemPrompts();
-  if (!activeSystemPromptId.value) newPrompt();
+function toolDisplayName(toolName) {
+  return TOOL_I18N?.[toolName]?.label || toolName || '(unknown)';
 }
 
-// 选择系统提示词后，加载其内容到编辑区
-async function loadPromptFromSelection() {
-  const row = systemPrompts.value.find((p) => p.id === activeSystemPromptId.value);
-  if (row) {
-    editingPrompt.id = row.id;
-    editingPrompt.name = row.name;
-    editingPrompt.content = row.content;
-    // 关键：切换选择时持久化
-    try {
-      await setActiveSystemPrompt(row.id);
-    } catch {
-      // ignore
-    }
-  } else {
-    editingPrompt.id = null;
-    editingPrompt.name = '';
-    editingPrompt.content = '';
-    try {
-      await setActiveSystemPrompt(null);
-    } catch {
-      // ignore
-    }
+async function waitSheetRendered() {
+  // SheetNext updates can be async; wait at least nextTick + 2 frames so DOM paints.
+  await nextTick();
+  await new Promise((r) => requestAnimationFrame(() => r()));
+  await new Promise((r) => requestAnimationFrame(() => r()));
+}
+
+function getEnabledToolsForMode() {
+  if (mode.value !== '编辑') return [];
+  const all = getSheetTools();
+  return toolsEnableAll.value
+    ? all
+    : all.filter((t) => selectedToolNames.value.includes(t?.function?.name));
+}
+
+async function send() {
+  const content = draft.value.trim();
+  if (!content) return;
+
+  messages.value.push({ id: crypto.randomUUID?.() ?? String(Date.now()), role: 'user', createdAt: Date.now(), content });
+  draft.value = '';
+
+  const assistantId = crypto.randomUUID?.() ?? String(Date.now() + 1);
+  messages.value.push({ id: assistantId, role: 'assistant', createdAt: Date.now(), content: '思考中…' });
+
+  const selected = llmConfigs.value.find((c) => c.id === activeConfigId.value);
+  if (!selected) {
+    messages.value.push({ id: crypto.randomUUID?.() ?? String(Date.now() + 2), role: 'system', createdAt: Date.now(), content: '请先在设置->模型设置里创建/选择模型配置。' });
+    return;
   }
-}
 
-// 初始化加载
-refreshSystemPrompts();
+  const provider = selected.provider;
+  const providerCfg = { apiKey: selected.apiKey, baseUrl: selected.baseUrl, modelName: selected.modelName };
 
-async function openHistory() {
-  // 打开历史前先保存当前会话，避免“最近会话”消息为空
+  const sysText = String(systemPrompts.value.find((p) => p.id === activeSystemPromptId.value)?.content || '').trim();
+  const historyMsgs = messages.value
+    .filter((m) => m.id !== assistantId)
+    .filter((m) => m.role === 'user' || m.role === 'assistant')
+    .map((m) => ({ role: m.role, content: m.content }));
+
+  // Mode contract:
+  // - 提问: never send tools
+  // - 编辑: allow tool calling and execute tool_calls
+  if (mode.value !== '提问' && mode.value !== '编辑') {
+    const idx = messages.value.findIndex((m) => m.id === assistantId);
+    if (idx >= 0) messages.value[idx] = { ...messages.value[idx], role: 'system', content: '该模式待开发：请先使用「提问」或「编辑」。' };
+    return;
+  }
+
+  const tools = getEnabledToolsForMode();
+  const baseMessages = sysText ? [{ role: 'system', content: sysText }, ...historyMsgs] : historyMsgs;
+
   try {
-    await saveCurrentConversation();
-  } catch {
-    // ignore
-  }
-  emit('open-history');
-}
+    requesting.value = true;
+
+    // Always try stream first for better UX.
+    const idx0 = messages.value.findIndex((m) => m.id === assistantId);
+    if (idx0 >= 0) messages.value[idx0] = { ...messages.value[idx0], content: '' };
+
+    // 提问：纯流式，不带 tools
+    if (mode.value === '提问') {
+      let full = '';
+      await chatCompletionStream({
+        provider,
+        config: providerCfg,
+        messages: baseMessages,
+        signal: undefined,
+        onDelta: (d) => {
+          full += d;
+          const idx = messages.value.findIndex((m) => m.id === assistantId);
+          if (idx >= 0) messages.value[idx] = { ...messages.value[idx], content: full };
+        },
+      });
+      return;
+    }
+
+    // tool loop (max 5)
+    let loopMessages = [...baseMessages];
+    let finalText = '';
+    let didRunTools = false;
+
+    pushSystem('编辑模式：正在分析是否需要调用工具…');
+
+    for (let i = 0; i < 5; i++) {
+      const resp = await chatCompletion({
+        provider,
+        config: providerCfg,
+        messages: loopMessages,
+        tools: mode.value === '编辑' ? tools : undefined,
+        toolChoice: mode.value === '编辑' ? 'auto' : undefined,
+      });
+
+      finalText = resp.content || finalText;
+      if (!resp.toolCalls || resp.toolCalls.length === 0 || mode.value === '提问') {
+        // No tool calls: stream the final answer for better UX (best-effort).
+        let full = '';
+        await chatCompletionStream({
+          provider,
+          config: providerCfg,
+          messages: loopMessages,
+          tools: undefined,
+          toolChoice: undefined,
+          onDelta: (d) => {
+            full += d;
+            const idx = messages.value.findIndex((m) => m.id === assistantId);
+            if (idx >= 0) messages.value[idx] = { ...messages.value[idx], content: full };
+          },
+        }).catch(() => {
+          // fallback to non-stream text
+          const idx = messages.value.findIndex((m) => m.id === assistantId);
+          if (idx >= 0) messages.value[idx] = { ...messages.value[idx], content: finalText || '' };
+        });
+        return;
+      }
+
+      // Append assistant tool call message + tool results.
+      loopMessages.push({ role: 'assistant', content: resp.content || '', tool_calls: resp.toolCalls });
+
+      didRunTools = true;
+      pushSystem(`检测到工具调用：${resp.toolCalls.length} 个，开始执行…`);
+
+      for (const tc of resp.toolCalls) {
+        const toolName = tc?.function?.name || '(unknown)';
+        pushSystem(`→ 执行工具：${toolDisplayName(toolName)}`);
+        const result = await runSheetToolCall(tc);
+        pushSystem(`✓ 工具完成：${toolDisplayName(toolName)}`);
+        loopMessages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify(result) });
+      }
+
+      // After tool writes, wait for SheetNext to paint before continuing.
+      await waitSheetRendered();
+    }
+
+    if (didRunTools) {
+      pushSystem('表格更新中…（等待渲染完成）');
+      await waitSheetRendered();
+      pushSystem('表格已更新并渲染完成。');
+    }
+
+    const idx = messages.value.findIndex((m) => m.id === assistantId);
+    if (idx >= 0) messages.value[idx] = { ...messages.value[idx], content: finalText || '' };
+   } catch (e) {
+     const idx = messages.value.findIndex((m) => m.id === assistantId);
+     if (idx >= 0) messages.value[idx] = { ...messages.value[idx], role: 'system', content: `请求失败：${e?.message ?? String(e)}` };
+   } finally {
+     requesting.value = false;
+     await nextTick();
+     bottomRef.value?.scrollIntoView?.({ block: 'end' });
+   }
+ }
+
+onMounted(() => {
+  refreshConfigs();
+  refreshSystemPrompts();
+  refreshAnchorFromSelection();
+});
 </script>
 
 <style scoped>

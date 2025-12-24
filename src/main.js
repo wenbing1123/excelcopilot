@@ -1,6 +1,7 @@
 import { createApp } from 'vue';
 import App from './App.vue';
 
+import './assets/app-vars.css';
 import './assets/sheetnext-overrides.css';
 
 import ElementPlus from 'element-plus';
