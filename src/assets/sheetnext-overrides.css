@@ -1,0 +1,74 @@
+/*
+  SheetNext UI overrides
+  Goal: keep SheetNext layout metrics stable while hiding the built-in AI Chat entry.
+  NOTE: Do NOT use display:none here; SheetNext measures toolbar children and the fx bar.
+  We hide visually but keep its box in layout.
+*/
+
+/*
+  Top bar alignment
+  - Left area/menu/actions align to the left
+  - Document title (.sn-file-name) stays on the right
+*/
+#SNContainer .sn-menu {
+  justify-content: flex-start !important;
+}
+
+/* Let the center menu list align left (SheetNext defaults to center) */
+#SNContainer .sn-menu-list {
+  justify-content: flex-start !important;
+}
+
+/* Default: don't auto-push filename; we'll place it into the right area below */
+#SNContainer .sn-file-name {
+  margin-left: 0 !important;
+}
+
+/* Tool bar align left (SheetNext defaults to center) */
+#SNContainer .sn-tools {
+  text-align: left !important;
+}
+
+/*
+  Hide built-in AI Chat entry with minimal layout impact.
+  We keep the element in DOM so internal code that queries it doesn't break,
+  but we collapse its visual width so controls can pack to the left.
+*/
+#SNContainer span[onclick*="Layout.showAIChat"],
+#SNContainer span[data-sn-ai-entry="1"] {
+  visibility: hidden !important;
+  opacity: 0 !important;
+  color: transparent !important;
+  text-shadow: none !important;
+  pointer-events: none !important;
+  width: 0 !important;
+  min-width: 0 !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  border: 0 !important;
+  overflow: hidden !important;
+  display: inline-block !important;
+}
+
+/* Put document title into the right area (where "© SheetNext" usually is) */
+#SNContainer .sn-menu-right {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: flex-end !important;
+}
+
+/* Hide brand/copyright in the top-right area (© SheetNext)
+   Keep file name visible. */
+#SNContainer .sn-menu-right :is(a, span, div)
+  :is(:not(.sn-file-name)) {
+  /* no-op: helps readability */
+}
+
+#SNContainer .sn-menu-right a[href*="sheetnext"],
+#SNContainer .sn-menu-right a[href*="SheetNext"],
+#SNContainer .sn-menu-right a.sn-text-primary,
+#SNContainer .sn-menu-right .sn-text-primary,
+#SNContainer .sn-menu-right .sn-color-999,
+#SNContainer .sn-menu-right .sn-color-666 {
+  display: none !important;
+}

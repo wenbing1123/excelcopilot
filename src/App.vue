@@ -80,6 +80,128 @@ const copilotRef = ref(null);
 
 const sn = shallowRef(null);
 
+// --- keep SheetNext layout intact; only disable built-in AI chat toggle ---
+function markBuiltInSheetNextAiEntry(root = document) {
+  try {
+    const spans = Array.from(root.querySelectorAll('span'));
+    for (const sp of spans) {
+      const onclick = sp.getAttribute('onclick') || '';
+      // target: <span onclick="SN_1.Layout.showAIChat=!SN_1.Layout.showAIChat" class="sn-cur">🤖</span>
+      if (onclick.includes('Layout.showAIChat')) {
+        sp.setAttribute('data-sn-ai-entry', '1');
+      }
+    }
+  } catch {
+    // ignore
+  }
+}
+
+let snAiEntryObserver = null;
+let restoreShowAiChat = null;
+let removeAiChatClickBlocker = null;
+
+function installAiChatClickBlocker(containerEl) {
+  if (!containerEl || removeAiChatClickBlocker) return;
+  const handler = (e) => {
+    // Capture phase blocker: prevents inline onclick from firing.
+    const target = e.target;
+    if (!(target instanceof Element)) return;
+    const el = target.closest?.('span[onclick*="Layout.showAIChat"], span[data-sn-ai-entry="1"]');
+    if (!el) return;
+    // IMPORTANT: don't stop propagation; SheetNext may rely on bubbling clicks
+    // to update toolbar/fx layout. stopImmediatePropagation is enough to prevent
+    // inline onclick from firing on the target element.
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  };
+  containerEl.addEventListener('click', handler, true);
+  removeAiChatClickBlocker = () => {
+    containerEl.removeEventListener('click', handler, true);
+    removeAiChatClickBlocker = null;
+  };
+}
+
+function disableSheetNextBuiltInAiChatToggle() {
+  // SheetNext puts itself on window as SN_1 / SN_2 ...; we saw the built-in onclick uses SN_1.Layout.showAIChat
+  // Goal: even if other UI actions (e.g. fx focus/click) toggle showAIChat, keep it disabled.
+  try {
+    const w = window;
+    // Try all SN_* instances, not only SN_1..3
+    const candidates = Object.keys(w)
+      .filter((k) => /^SN_\d+$/.test(k))
+      .map((k) => w[k])
+      .filter(Boolean);
+    // Fallback to a couple explicit names just in case
+    if (candidates.length === 0) candidates.push(w?.SN_1, w?.SN_2, w?.SN_3);
+
+    for (const snAny of candidates) {
+      const layout = snAny?.Layout;
+      if (!layout) continue;
+
+      // best-effort: keep original in case component unmounts
+      const originalDescriptor = Object.getOwnPropertyDescriptor(layout, 'showAIChat');
+      const originalValue = layout.showAIChat;
+
+      // Force it to always be false and non-writable (when possible)
+      try {
+        Object.defineProperty(layout, 'showAIChat', {
+          configurable: true,
+          enumerable: true,
+          get() {
+            return false;
+          },
+          set() {
+            // ignore attempts to toggle
+          },
+        });
+      } catch {
+        // fallback if defineProperty fails: at least set false
+        layout.showAIChat = false;
+      }
+
+      // Some builds may have a method that toggles this flag; neutralize it if present.
+      if (typeof layout.showAIChatToggle === 'function') {
+        layout.showAIChatToggle = () => {};
+      }
+
+      // store restore only once (best effort)
+      if (!restoreShowAiChat) {
+        restoreShowAiChat = () => {
+          try {
+            if (originalDescriptor) Object.defineProperty(layout, 'showAIChat', originalDescriptor);
+            else layout.showAIChat = originalValue;
+          } catch {
+            // ignore restore failures
+          }
+          restoreShowAiChat = null;
+        };
+      }
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function startRemoveObserver(containerEl) {
+  if (!containerEl || snAiEntryObserver) return;
+  snAiEntryObserver = new MutationObserver((mutations) => {
+    for (const m of mutations) {
+      for (const node of m.addedNodes || []) {
+        if (!(node instanceof HTMLElement)) continue;
+        markBuiltInSheetNextAiEntry(node);
+      }
+    }
+  });
+  snAiEntryObserver.observe(containerEl, { childList: true, subtree: true });
+}
+
+function stopRemoveObserver() {
+  if (snAiEntryObserver) {
+    snAiEntryObserver.disconnect();
+    snAiEntryObserver = null;
+  }
+}
+
 const MIN = 320;
 const MAX = 720;
 const RAIL_W = 36; // persistent sidebar width
@@ -211,9 +333,27 @@ onMounted(() => {
   const el = document.querySelector('#SNContainer');
   if (!el) return;
   sn.value = new SheetNext(el);
+
+  // Disable built-in AI chat behavior at the source
+  disableSheetNextBuiltInAiChatToggle();
+
+  // Block click on the built-in entry if it exists, without changing layout
+  installAiChatClickBlocker(el);
+
+  // mark once immediately + keep marking if SheetNext re-inserts
+  markBuiltInSheetNextAiEntry(el);
+  startRemoveObserver(el);
+
+  // One more mark pass next frame in case SheetNext injects toolbar items asynchronously.
+  requestAnimationFrame(() => {
+    markBuiltInSheetNextAiEntry(el);
+  });
 });
 
 onBeforeUnmount(() => {
+  stopRemoveObserver();
+  if (typeof removeAiChatClickBlocker === 'function') removeAiChatClickBlocker();
+  if (typeof restoreShowAiChat === 'function') restoreShowAiChat();
   const inst = sn.value;
   if (inst && typeof inst.destroy === 'function') inst.destroy();
   else if (inst && typeof inst.dispose === 'function') inst.dispose();
