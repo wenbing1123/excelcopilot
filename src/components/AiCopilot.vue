@@ -7,7 +7,14 @@
       </div>
 
       <div class="topbar__right">
-        <!-- Clear icon -->
+        <!-- 设置 -->
+        <el-tooltip content="设置" placement="bottom">
+          <el-button size="small" circle text type="info" @click="openSettings" aria-label="设置">
+            <span style="font-size:14px; line-height:1">⚙</span>
+          </el-button>
+        </el-tooltip>
+
+        <!-- 清空 -->
         <el-tooltip content="清空" placement="bottom">
           <el-button
             size="small"
@@ -22,7 +29,19 @@
           </el-button>
         </el-tooltip>
 
-        <!-- 移除：顶部设置按钮（改由右侧侧边栏打开） -->
+        <!-- 历史对话 -->
+        <el-tooltip content="历史对话" placement="bottom">
+          <el-button size="small" circle text type="primary" @click="openHistory" aria-label="历史对话">
+            <span style="font-size:14px; line-height:1">🕘</span>
+          </el-button>
+        </el-tooltip>
+
+        <!-- 新建会话 -->
+        <el-tooltip content="新建会话" placement="bottom">
+          <el-button size="small" circle text type="success" @click="newConversation" aria-label="新建会话">
+            <span style="font-size:14px; line-height:1">＋</span>
+          </el-button>
+        </el-tooltip>
       </div>
     </header>
 
@@ -41,7 +60,52 @@
 
         <section class="settings__main">
           <template v-if="settingsSection === 'general'">
-            <el-alert type="info" show-icon :closable="false" title="通用设置（占位）后续可放默认模式/默认模型/快捷键等" />
+            <el-alert
+              type="info"
+              show-icon
+              :closable="false"
+              title="通用设置：可配置系统提示词（system prompt），用于约束模型的回答风格/能力。"
+              style="margin-bottom: 12px"
+            />
+
+            <div style="display:flex; gap:10px; align-items:center; margin-bottom: 10px">
+              <el-select
+                v-model="activeSystemPromptId"
+                placeholder="选择系统提示词"
+                filterable
+                style="width: 260px"
+                :loading="promptLoading"
+                @change="async () => { await setActiveSystemPrompt(activeSystemPromptId); loadPromptFromSelection(); }"
+              >
+                <el-option v-for="p in systemPrompts" :key="p.id" :label="p.name" :value="p.id" />
+              </el-select>
+
+              <el-button @click="newPrompt">新增</el-button>
+              <el-button type="primary" :disabled="!editingPrompt.name || !editingPrompt.content" @click="savePromptDb">保存</el-button>
+              <el-button type="danger" plain :disabled="!editingPrompt.id" @click="removePromptDb">删除</el-button>
+            </div>
+
+            <el-form label-position="top">
+              <el-form-item label="名称">
+                <el-input v-model="editingPrompt.name" placeholder="例如：表格 AI 助手" />
+              </el-form-item>
+
+              <el-form-item label="系统提示词内容">
+                <el-input
+                  v-model="editingPrompt.content"
+                  type="textarea"
+                  :rows="8"
+                  resize="vertical"
+                  placeholder="例如：你是一个 Excel/表格助手..."
+                />
+              </el-form-item>
+
+              <el-form-item label="调试">
+                <el-switch v-model="showPromptDebug" active-text="在控制台打印本次请求的完整提示词" />
+              </el-form-item>
+
+              <el-text type="info" size="small">选中的系统提示词会在每次对话请求时作为第一条 system message 发送给模型。</el-text>
+            </el-form>
           </template>
 
           <template v-else-if="settingsSection === 'models'">
@@ -49,23 +113,52 @@
               type="info"
               show-icon
               :closable="false"
-              title="为每个 LLM 配置 api-key 和 base-url；base-url 留空将使用官方默认。"
+              title="模型配置已存入本地 SQLite（通过本地服务提供 API）。这里可新增/编辑/删除配置。"
               style="margin-bottom: 12px"
             />
 
-            <div style="display:flex; gap:12px; align-items:center; margin-bottom: 8px">
-              <el-text type="info">选择模型：</el-text>
-              <el-segmented v-model="activeProvider" :options="providerOptions" />
+            <div style="display:flex; gap:10px; align-items:center; margin-bottom: 10px">
+              <el-select
+                v-model="activeConfigId"
+                placeholder="选择配置"
+                filterable
+                style="width: 260px"
+                :loading="configsLoading"
+              >
+                <el-option v-for="c in llmConfigs" :key="c.id" :label="c.name" :value="c.id" />
+              </el-select>
+
+              <el-button @click="newConfig">新增</el-button>
+              <el-button type="primary" :disabled="!editingConfig.name" @click="saveConfigDb">保存</el-button>
+              <el-button type="danger" plain :disabled="!activeConfigId" @click="removeSelectedConfig">删除</el-button>
             </div>
 
-            <el-form label-position="top" size="default">
-              <el-form-item label="API Key">
-                <el-input v-model="llmConfig.providers[activeProvider].apiKey" type="password" show-password placeholder="sk-..." />
+            <el-form label-position="top">
+              <el-form-item label="名称（例如 GPT5.2）">
+                <el-input v-model="editingConfig.name" placeholder="GPT5.2" />
               </el-form-item>
+
+              <el-form-item label="Provider">
+                <el-select v-model="editingConfig.provider" style="width: 240px">
+                  <el-option v-for="p in models" :key="p" :label="p" :value="p" />
+                </el-select>
+              </el-form-item>
+
+              <el-form-item label="Model Name">
+                <el-input v-model="editingConfig.modelName" :placeholder="providerDefaults[editingConfig.provider].model" />
+              </el-form-item>
+
               <el-form-item label="Base URL（可空，使用默认）">
-                <el-input v-model="llmConfig.providers[activeProvider].baseUrl" :placeholder="providerDefaults[activeProvider].baseUrl" />
+                <el-input v-model="editingConfig.baseUrl" :placeholder="providerDefaults[editingConfig.provider].baseUrl" />
               </el-form-item>
-              <el-text type="info" size="small">默认：{{ providerDefaults[activeProvider].baseUrl }} / model={{ providerDefaults[activeProvider].model }}</el-text>
+
+              <el-form-item label="API Key">
+                <el-input v-model="editingConfig.apiKey" type="password" show-password placeholder="sk-..." />
+              </el-form-item>
+
+              <el-text type="info" size="small">
+                默认：{{ providerDefaults[editingConfig.provider].baseUrl }} / model={{ providerDefaults[editingConfig.provider].model }}
+              </el-text>
             </el-form>
           </template>
 
@@ -183,9 +276,16 @@
               <el-option v-for="m in modes" :key="m" :label="m" :value="m" />
             </el-select>
 
-            <!-- 模型紧跟其后 -->
-            <el-select v-model="model" size="small" class="model" placeholder="模型">
-              <el-option v-for="m in models" :key="m" :label="m" :value="m" />
+            <!-- 配置名（取代原“模型”provider） -->
+            <el-select
+              v-model="activeConfigId"
+              size="small"
+              class="model"
+              placeholder="配置"
+              filterable
+              :loading="configsLoading"
+            >
+              <el-option v-for="c in llmConfigs" :key="c.id" :label="c.name" :value="c.id" />
             </el-select>
 
             <el-text v-if="mode === '编辑'" type="warning" size="small" class="edit-hint">
@@ -200,7 +300,7 @@
         </div>
 
         <div v-if="requesting" style="margin-top: 6px">
-          <el-text type="info" size="small">正在请求 {{ model }} …</el-text>
+          <el-text type="info" size="small">正在请求 {{ activeConfigLabel }} …</el-text>
         </div>
       </div>
     </footer>
@@ -208,18 +308,26 @@
 </template>
 
 <script setup>
-import { ref, computed, nextTick, watch, reactive } from 'vue';
-import { Document, Folder, Setting, Delete, Fold } from '@element-plus/icons-vue';
+import { ref, computed, nextTick, watch, reactive, onMounted } from 'vue';
+import { Document, Folder, Delete } from '@element-plus/icons-vue';
+import { getProviderDefaults, chatCompletion, chatCompletionStream, PROVIDERS } from '../services/llmClient.js';
+import { listLlmConfigs, createLlmConfig, updateLlmConfig, deleteLlmConfig } from '../services/llmConfigApi.js';
 import {
-  loadLlmConfig,
-  saveLlmConfig as persistLlmConfig,
-  getDefaultConfig,
-  getProviderDefaults,
-  chatCompletion,
-  PROVIDERS,
-} from '../services/llmClient.js';
-
-const emit = defineEmits(['toggle-collapse']);
+  getRecentConversation,
+  listConversations as apiListConversations,
+  getConversationMessages,
+  createConversation,
+  saveConversation,
+} from '../services/conversationApi.js';
+import {
+  listSystemPrompts,
+  createSystemPrompt,
+  updateSystemPrompt,
+  deleteSystemPrompt,
+  getActiveSystemPrompt,
+  setActiveSystemPrompt,
+} from '../services/systemPromptApi.js';
+import { buildDebugPrompt } from '../services/debugPrompt.js';
 
 // SheetNext 实例（由 App.vue 传入）
 const props = defineProps({
@@ -229,38 +337,31 @@ const props = defineProps({
 
 const hasSheet = computed(() => !!props.sheet);
 
-
-function toggleCollapse() {
-  emit('toggle-collapse');
-}
-
-
-// 模式顺序：提问、编辑、智能体、计划
-const modes = ['提问', '编辑', '智能体', '计划'];
-const models = [PROVIDERS.GPT, PROVIDERS.DEEPSEEK, PROVIDERS.DOUBAO];
-
-const mode = ref(modes[0]);
-const model = ref(models[0]);
-
-// Context scope (placeholder: sheet/workbook)
-const contextScope = ref('sheet');
-
+// 基础聊天状态（之前缺失导致 messages is not defined 白屏）
 const draft = ref('');
 const messages = ref([]);
 
 const scrollbarRef = ref(null);
 const bottomRef = ref(null);
 
+// Context scope (placeholder: sheet/workbook)
+const contextScope = ref('sheet');
+
+const serverStatus = ref('');
+
+const pickedHint = computed(() => {
+  return serverStatus.value || '配置服务：未连接';
+});
+
+// 模式顺序：提问、编辑、智能体、计划
+const modes = ['提问', '编辑', '智能体', '计划'];
+const mode = ref(modes[0]);
+
+// 调试：打印本次请求的完整提示词（仅开发使用）
+const showPromptDebug = ref(false);
+
 const settingsOpen = ref(false);
 const settingsSection = ref('general');
-
-const providerOptions = [
-  { label: 'GPT', value: PROVIDERS.GPT },
-  { label: 'DeepSeek', value: PROVIDERS.DEEPSEEK },
-  { label: '豆包', value: PROVIDERS.DOUBAO },
-];
-
-const activeProvider = ref(PROVIDERS.GPT);
 
 const providerDefaults = {
   [PROVIDERS.GPT]: getProviderDefaults(PROVIDERS.GPT),
@@ -268,22 +369,28 @@ const providerDefaults = {
   [PROVIDERS.DOUBAO]: getProviderDefaults(PROVIDERS.DOUBAO),
 };
 
-const llmConfig = reactive(loadLlmConfig());
+// providers list for model config UI
+const models = [PROVIDERS.GPT, PROVIDERS.DEEPSEEK, PROVIDERS.DOUBAO];
 
 function openSettings() {
   settingsOpen.value = true;
+  // 默认进入通用设置，方便看到系统提示词/调试开关
+  settingsSection.value = 'general';
 }
+
+const emit = defineEmits(['open-history']);
 
 defineExpose({
   openSettings,
+  // 下面这些给 App 的“历史对话弹窗”用
+  listConversations,
+  loadConversationById,
+  newConversation,
+  saveCurrentConversation,
 });
 
-// function openSettings() {
-//   settingsOpen.value = true;
-// }
 
-const pickedHint = computed(() => '附件：未启用');
-
+// 滚动到底部：放在 messages 定义之后
 watch(
   () => messages.value.length,
   async () => {
@@ -308,26 +415,39 @@ function formatTime(ts) {
 }
 
 function saveConfig() {
-  persistLlmConfig({ providers: { ...llmConfig.providers } });
-  settingsOpen.value = false;
-  messages.value.push({
-    id: crypto.randomUUID?.() ?? String(Date.now()),
-    role: 'system',
-    createdAt: Date.now(),
-    content: '模型配置已保存。',
-  });
+  // 兼容旧 footer 的“保存”按钮：保存到 SQLite
+  return saveConfigDb();
 }
 
 function resetConfig() {
-  const d = getDefaultConfig();
-  // 保持 reactive 对象引用稳定
-  llmConfig.providers[PROVIDERS.GPT] = { ...d.providers[PROVIDERS.GPT] };
-  llmConfig.providers[PROVIDERS.DEEPSEEK] = { ...d.providers[PROVIDERS.DEEPSEEK] };
-  llmConfig.providers[PROVIDERS.DOUBAO] = { ...d.providers[PROVIDERS.DOUBAO] };
+  // 重置为新建
+  return newConfig();
 }
 
 const requesting = ref(false);
 let abortController = null;
+
+const activeConfigLabel = computed(() => {
+  const c = llmConfigs.value.find((x) => x.id === activeConfigId.value);
+  return c?.name || '未选择配置';
+});
+
+// 让发送时展示更友好（显示 provider + modelName）
+const activeModelHint = computed(() => {
+  const c = llmConfigs.value.find((x) => x.id === activeConfigId.value);
+  if (!c) return '';
+  const p = c.provider;
+  const defaults = providerDefaults[p] || { model: '' };
+  const mn = c.modelName || defaults.model;
+  return `${p}${mn ? ' / ' + mn : ''}`;
+});
+
+onMounted(() => {
+  refreshConfigs();
+  loadRecentConversation();
+  // 加载系统提示词（用于注入 system message）
+  refreshSystemPrompts();
+});
 
 async function send() {
   const content = draft.value.trim();
@@ -335,13 +455,37 @@ async function send() {
 
   const scopeLabel = contextScope.value === 'workbook' ? '整个Excel' : '当前Sheet';
 
-  // push user first
-  messages.value.push({
-    id: crypto.randomUUID?.() ?? String(Date.now()),
+  const userId = crypto.randomUUID?.() ?? String(Date.now());
+  const userMsg = {
+    id: userId,
     role: 'user',
     createdAt: Date.now(),
-    content: `[${mode.value} / ${model.value} / ${scopeLabel}] ${content}`,
-  });
+    content,
+    meta: {
+      mode: mode.value,
+      configName: activeConfigLabel.value,
+      modelHint: activeModelHint.value,
+      contextScope: contextScope.value,
+      contextLabel: scopeLabel,
+    },
+  };
+  messages.value.push(userMsg);
+
+  // 如果当前还没有会话记录（新建会话后的第一次发言），先创建会话并用首条 user 生成标题
+  if (!activeConversationId.value) {
+    const title = deriveTitleFromMessages(messages.value);
+    if (title) {
+      const created = await createConversation(title);
+      activeConversationId.value = created?.id ?? null;
+    }
+  }
+
+  // 先把 user 消息保存进库（这样“最近会话”至少有内容）
+  try {
+    await saveCurrentConversation();
+  } catch {
+    // ignore
+  }
 
   if (mode.value === '编辑') {
     handleEditCommand(content);
@@ -351,39 +495,151 @@ async function send() {
 
   draft.value = '';
 
-  // real chat (MVP)
+  const selected = llmConfigs.value.find((c) => c.id === activeConfigId.value);
+  if (!selected) {
+    messages.value.push({
+      id: crypto.randomUUID?.() ?? String(Date.now() + 2),
+      role: 'system',
+      createdAt: Date.now(),
+      content: '未选择任何模型配置：请先在 设置 -> 模型设置 中创建/选择配置。',
+    });
+    return;
+  }
+
+  const assistantId = crypto.randomUUID?.() ?? String(Date.now() + 1);
+  messages.value.push({
+    id: assistantId,
+    role: 'assistant',
+    createdAt: Date.now(),
+    content: '正在思考…',
+  });
+
   try {
     requesting.value = true;
     abortController?.abort?.();
     abortController = new AbortController();
 
-    const provider = model.value;
-    const providerCfg = llmConfig.providers?.[provider] || {};
+    const provider = selected.provider;
+
+    const providerCfg = {
+      apiKey: selected.apiKey,
+      baseUrl: selected.baseUrl,
+      modelName: selected.modelName,
+    };
 
     const inputMessages = messages.value
+      .filter((m) => m.id !== assistantId) // 排除占位
       .filter((m) => m.role === 'user' || m.role === 'assistant')
       .map((m) => ({ role: m.role, content: m.content }));
 
-    const resp = await chatCompletion({
-      provider,
-      config: providerCfg,
-      messages: inputMessages,
-      signal: abortController.signal,
-    });
+    // 注入系统提示词（system prompt）作为第一条 system message
+    const fallbackPromptId = activeSystemPromptId.value ?? systemPrompts.value[0]?.id ?? null;
+    const sysPrompt = systemPrompts.value.find((p) => p.id === fallbackPromptId);
+    const sysText = String(sysPrompt?.content || '').trim();
+    const finalMessages = sysText
+      ? [{ role: 'system', content: sysText }, ...inputMessages]
+      : inputMessages;
 
-    messages.value.push({
-      id: crypto.randomUUID?.() ?? String(Date.now() + 1),
-      role: 'assistant',
-      createdAt: Date.now(),
-      content: resp.content,
+    // Debug: 在控制台输出本次实际发送的完整 messages
+    const defaults = providerDefaults[provider] || { baseUrl: '', model: '' };
+    const debugPayload = buildDebugPrompt({
+      provider,
+      baseUrl: providerCfg.baseUrl || defaults.baseUrl,
+      modelName: providerCfg.modelName || defaults.model,
+      messages: finalMessages,
     });
+    if (showPromptDebug.value) {
+      console.log('[LLM DEBUG] request payload:', debugPayload);
+    } else {
+      console.log('[LLM DEBUG] system prompt:', sysText ? `ON (${sysText.slice(0, 40)}${sysText.length > 40 ? '…' : ''})` : 'OFF');
+    }
+
+    const idx = messages.value.findIndex((m) => m.id === assistantId);
+    if (idx >= 0) {
+      messages.value[idx] = {
+        ...messages.value[idx],
+        createdAt: Date.now(),
+        content: '',
+      };
+    }
+
+    // 流式：每次增量都追加到同一条 assistant 消息
+    const appendDelta = async (delta) => {
+      if (!delta) return;
+      const i = messages.value.findIndex((m) => m.id === assistantId);
+      if (i < 0) return;
+      messages.value[i] = {
+        ...messages.value[i],
+        content: (messages.value[i].content || '') + delta,
+      };
+      await nextTick();
+      bottomRef.value?.scrollIntoView({ block: 'end' });
+    };
+
+    try {
+      await chatCompletionStream({
+        provider,
+        config: providerCfg,
+        messages: finalMessages,
+        signal: abortController.signal,
+        onDelta: (d) => {
+          // 做“逐字”效果：把 token 再拆成字符按微任务写入
+          const chars = String(d || '').split('');
+          for (const ch of chars) {
+            // 不 await，避免阻塞解析；用 microtask 排队
+            Promise.resolve().then(() => appendDelta(ch));
+          }
+        },
+      });
+
+      // 流式结束后保存（assistant 回复入库）
+      try {
+        await saveCurrentConversation();
+      } catch {
+        // ignore
+      }
+    } catch (streamErr) {
+      // 回退：非流式一次性
+      const resp = await chatCompletion({
+        provider,
+        config: providerCfg,
+        messages: finalMessages,
+        signal: abortController.signal,
+      });
+      const i = messages.value.findIndex((m) => m.id === assistantId);
+      if (i >= 0) {
+        messages.value[i] = {
+          ...messages.value[i],
+          createdAt: Date.now(),
+          content: resp.content,
+        };
+      }
+
+      // 非流式完成后保存
+      try {
+        await saveCurrentConversation();
+      } catch {
+        // ignore
+      }
+    }
   } catch (e) {
-    messages.value.push({
-      id: crypto.randomUUID?.() ?? String(Date.now() + 2),
-      role: 'system',
-      createdAt: Date.now(),
-      content: `请求失败：${e?.message ?? String(e)}`,
-    });
+    const idx = messages.value.findIndex((m) => m.id === assistantId);
+    const errText = `请求失败：${e?.message ?? String(e)}`;
+    if (idx >= 0) {
+      messages.value[idx] = {
+        ...messages.value[idx],
+        role: 'system',
+        createdAt: Date.now(),
+        content: errText,
+      };
+    } else {
+      messages.value.push({
+        id: crypto.randomUUID?.() ?? String(Date.now() + 2),
+        role: 'system',
+        createdAt: Date.now(),
+        content: errText,
+      });
+    }
   } finally {
     requesting.value = false;
   }
@@ -511,15 +767,357 @@ function tryReadCell(sheet, addr) {
 
   return { found: false, value: undefined };
 }
+
+const llmConfigs = ref([]);
+const activeConfigId = ref(null);
+const editingConfig = reactive({ id: null, name: '', provider: PROVIDERS.GPT, baseUrl: '', apiKey: '', modelName: '' });
+const configsLoading = ref(false);
+
+async function refreshConfigs() {
+  configsLoading.value = true;
+  try {
+    const rows = await listLlmConfigs();
+    llmConfigs.value = Array.isArray(rows) ? rows : [];
+    serverStatus.value = '配置服务：已连接';
+
+    // 如果当前没有选中，则自动选中第一条
+    if (activeConfigId.value == null && llmConfigs.value.length > 0) {
+      activeConfigId.value = llmConfigs.value[0].id;
+    }
+
+    // 同步编辑表单
+    loadEditingFromSelected();
+  } catch (e) {
+    serverStatus.value = '配置服务：未启动';
+    llmConfigs.value = [];
+    activeConfigId.value = null;
+    // 只提示一次，避免刷屏
+    const already = messages.value.some((m) => m.role === 'system' && String(m.content || '').includes('模型配置服务不可用'));
+    if (!already) {
+      messages.value.push({
+        id: crypto.randomUUID?.() ?? String(Date.now()),
+        role: 'system',
+        createdAt: Date.now(),
+        content: `模型配置服务不可用：${e?.message ?? String(e)}`,
+      });
+    }
+  } finally {
+    configsLoading.value = false;
+  }
+}
+
+function loadEditingFromSelected() {
+  const row = llmConfigs.value.find((r) => r.id === activeConfigId.value);
+  if (!row) return;
+  editingConfig.id = row.id;
+  editingConfig.name = row.name || '';
+  editingConfig.provider = row.provider || PROVIDERS.GPT;
+  editingConfig.baseUrl = row.baseUrl || '';
+  editingConfig.apiKey = row.apiKey || '';
+  editingConfig.modelName = row.modelName || '';
+}
+
+function newConfig() {
+  editingConfig.id = null;
+  editingConfig.name = '';
+  editingConfig.provider = PROVIDERS.GPT;
+  editingConfig.baseUrl = '';
+  editingConfig.apiKey = '';
+  editingConfig.modelName = '';
+}
+
+async function saveConfigDb() {
+  const payload = {
+    name: editingConfig.name,
+    provider: editingConfig.provider,
+    baseUrl: editingConfig.baseUrl,
+    apiKey: editingConfig.apiKey,
+    modelName: editingConfig.modelName,
+  };
+
+  const saved = editingConfig.id
+    ? await updateLlmConfig(editingConfig.id, payload)
+    : await createLlmConfig(payload);
+
+  await refreshConfigs();
+  if (saved?.id != null) {
+    activeConfigId.value = saved.id;
+  }
+  await refreshConfigs();
+
+  // 保存后关闭弹窗
+  settingsOpen.value = false;
+
+  messages.value.push({
+    id: crypto.randomUUID?.() ?? String(Date.now()),
+    role: 'system',
+    createdAt: Date.now(),
+    content: '模型配置已保存。',
+  });
+}
+
+async function removeSelectedConfig() {
+  if (!activeConfigId.value) return;
+
+  await deleteLlmConfig(activeConfigId.value);
+  activeConfigId.value = null;
+  await refreshConfigs();
+  if (!activeConfigId.value) newConfig();
+}
+
+const activeConversationId = ref(null);
+
+function mapDbMessageToUi(m) {
+  return {
+    id: String(m.id ?? crypto.randomUUID?.() ?? Date.now()),
+    role: m.role,
+    createdAt: m.createdAt ? Date.parse(m.createdAt) || Date.now() : Date.now(),
+    content: m.content,
+  };
+}
+
+function normalizeTitle(raw) {
+  const s = String(raw || '').replace(/\s+/g, ' ').trim();
+  if (!s) return '(无标题)';
+  // 截断，避免太长
+  return s.length > 30 ? s.slice(0, 30) + '…' : s;
+}
+
+function deriveTitleFromMessages(msgs) {
+  const firstUser = (msgs || []).find((m) => m?.role === 'user' && String(m?.content || '').trim());
+  if (!firstUser) return '';
+
+  const text = String(firstUser.content || '').trim();
+  return normalizeTitle(text);
+}
+
+async function loadRecentConversation() {
+  try {
+    const rec = await getRecentConversation();
+    if (!rec || !rec.id) {
+      // 没有历史会话就保持空白，不创建占位会话
+      activeConversationId.value = null;
+      messages.value = [];
+      return;
+    }
+
+    activeConversationId.value = rec.id;
+    const data = await getConversationMessages(rec.id);
+    const dbMsgs = Array.isArray(data?.messages) ? data.messages : [];
+    messages.value = dbMsgs.map(mapDbMessageToUi);
+    await nextTick();
+    bottomRef.value?.scrollIntoView({ block: 'end' });
+  } catch (e) {
+    // 不阻断 UI
+    messages.value.push({
+      id: crypto.randomUUID?.() ?? String(Date.now()),
+      role: 'system',
+      createdAt: Date.now(),
+      content: `加载最近会话失败：${e?.message ?? String(e)}`,
+    });
+  }
+}
+
+async function loadConversationById(id) {
+  const data = await getConversationMessages(id);
+  activeConversationId.value = id;
+  const dbMsgs = Array.isArray(data?.messages) ? data.messages : [];
+  messages.value = dbMsgs.map(mapDbMessageToUi);
+  await nextTick();
+  bottomRef.value?.scrollIntoView({ block: 'end' });
+}
+
+async function saveCurrentConversation() {
+  // 没有任何 user 消 Messages 时，不保存/不创建会话（避免历史里出现无意义记录）
+  let title = deriveTitleFromMessages(messages.value);
+  if (!title) {
+    // 如果已经有会话 id（比如从历史加载来的），允许保存为空内容的更新（比如只剩 assistant/system）
+    if (!activeConversationId.value) return;
+    title = '(无标题)';
+  }
+
+  if (!activeConversationId.value) {
+    const created = await createConversation(title);
+    activeConversationId.value = created?.id ?? null;
+  }
+
+  const payload = {
+    title,
+    messages: messages.value.map((m) => ({ role: m.role, content: m.content })),
+  };
+
+  await saveConversation(activeConversationId.value, payload);
+}
+
+async function newConversation() {
+  // 点击必须“立刻清空 UI”，即便保存失败也不能卡住
+  try {
+    await saveCurrentConversation();
+  } catch (e) {
+    messages.value.push({
+      id: crypto.randomUUID?.() ?? String(Date.now()),
+      role: 'system',
+      createdAt: Date.now(),
+      content: `保存当前会话失败：${e?.message ?? String(e)}`,
+    });
+  } finally {
+    activeConversationId.value = null;
+    messages.value = [];
+    draft.value = '';
+    await nextTick();
+    bottomRef.value?.scrollIntoView({ block: 'end' });
+  }
+}
+
+async function listConversations() {
+  return apiListConversations();
+}
+
+const systemPrompts = ref([]);
+const activeSystemPromptId = ref(null);
+const promptLoading = ref(false);
+const editingPrompt = reactive({ id: null, name: '', content: '' });
+
+async function refreshSystemPrompts() {
+  promptLoading.value = true;
+  try {
+    const rows = await listSystemPrompts();
+    systemPrompts.value = Array.isArray(rows) ? rows : [];
+    const active = await getActiveSystemPrompt();
+    activeSystemPromptId.value = active?.activeSystemPromptId ?? null;
+
+    // 如果后端还没有设置选中项，但本地已有 prompts，则默认选中第一条并持久化
+    if (activeSystemPromptId.value == null && systemPrompts.value.length > 0) {
+      activeSystemPromptId.value = systemPrompts.value[0].id;
+      try {
+        await setActiveSystemPrompt(activeSystemPromptId.value);
+      } catch {
+        // ignore
+      }
+    }
+
+    // 同步编辑区
+    const row = systemPrompts.value.find((p) => p.id === activeSystemPromptId.value) || systemPrompts.value[0];
+    if (row) {
+      editingPrompt.id = row.id;
+      editingPrompt.name = row.name;
+      editingPrompt.content = row.content;
+    } else {
+      editingPrompt.id = null;
+      editingPrompt.name = '';
+      editingPrompt.content = '';
+    }
+  } catch (e) {
+    messages.value.push({
+      id: crypto.randomUUID?.() ?? String(Date.now()),
+      role: 'system',
+      createdAt: Date.now(),
+      content: `加载系统提示词失败：${e?.message ?? String(e)}`,
+    });
+  } finally {
+    promptLoading.value = false;
+  }
+}
+
+function newPrompt() {
+  editingPrompt.id = null;
+  editingPrompt.name = '';
+  editingPrompt.content = '';
+}
+
+async function savePromptDb() {
+  const payload = {
+    name: editingPrompt.name,
+    content: editingPrompt.content,
+  };
+
+  const saved = editingPrompt.id
+    ? await updateSystemPrompt(editingPrompt.id, payload)
+    : await createSystemPrompt(payload);
+
+  await refreshSystemPrompts();
+  if (saved?.id != null) {
+    activeSystemPromptId.value = saved.id;
+    // 关键：把选中项持久化到 app_settings，避免刷新/重开后丢失
+    try {
+      await setActiveSystemPrompt(saved.id);
+    } catch {
+      // ignore
+    }
+  }
+  await refreshSystemPrompts();
+
+  messages.value.push({
+    id: crypto.randomUUID?.() ?? String(Date.now()),
+    role: 'system',
+    createdAt: Date.now(),
+    content: '系统提示词已保存。',
+  });
+}
+
+async function removePromptDb() {
+  if (!editingPrompt.id) return;
+
+  await deleteSystemPrompt(editingPrompt.id);
+  editingPrompt.id = null;
+  await refreshSystemPrompts();
+  if (!activeSystemPromptId.value) newPrompt();
+}
+
+// 选择系统提示词后，加载其内容到编辑区
+async function loadPromptFromSelection() {
+  const row = systemPrompts.value.find((p) => p.id === activeSystemPromptId.value);
+  if (row) {
+    editingPrompt.id = row.id;
+    editingPrompt.name = row.name;
+    editingPrompt.content = row.content;
+    // 关键：切换选择时持久化
+    try {
+      await setActiveSystemPrompt(row.id);
+    } catch {
+      // ignore
+    }
+  } else {
+    editingPrompt.id = null;
+    editingPrompt.name = '';
+    editingPrompt.content = '';
+    try {
+      await setActiveSystemPrompt(null);
+    } catch {
+      // ignore
+    }
+  }
+}
+
+// 初始化加载
+refreshSystemPrompts();
+
+async function openHistory() {
+  // 打开历史前先保存当前会话，避免“最近会话”消息为空
+  try {
+    await saveCurrentConversation();
+  } catch {
+    // ignore
+  }
+  emit('open-history');
+}
 </script>
 
 <style scoped>
+/* 恢复为更接近 Element Plus 的简洁布局，避免覆盖过多组件默认样式 */
 .copilot {
   height: 100%;
+  width: 100%;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   background: #ffffff;
-  border-left: 1px solid var(--el-border-color);
+}
+
+.topbar,
+.chat,
+.composer {
+  min-width: 0;
 }
 
 .topbar {
@@ -541,19 +1139,31 @@ function tryReadCell(sheet, addr) {
   color: var(--el-text-color-primary);
 }
 
+.topbar__right {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .chat {
   flex: 1;
   min-height: 0;
   padding: 8px 10px;
   box-sizing: border-box;
   background: #ffffff;
+  overflow: hidden;
 }
 
 .chat__scroll {
   height: 100%;
-  border-radius: 10px;
-  background: #ffffff;
-  border: 1px solid var(--el-border-color-lighter);
+}
+
+.chat__scroll :deep(.el-scrollbar__wrap) {
+  height: 100%;
+}
+
+.chat__scroll :deep(.el-scrollbar__view) {
+  min-height: 100%;
 }
 
 .chat__list {
@@ -619,12 +1229,12 @@ function tryReadCell(sheet, addr) {
 }
 
 .composer {
+  margin-top: auto;
   border-top: 1px solid var(--el-border-color-lighter);
   padding: 10px;
   box-sizing: border-box;
   background: #ffffff;
 }
-
 
 .composer__box {
   display: flex;
@@ -685,16 +1295,12 @@ function tryReadCell(sheet, addr) {
   flex-wrap: wrap;
 }
 
-.edit-hint {
-  white-space: nowrap;
-}
-
 .mode {
   width: 120px;
 }
 
 .model {
-  width: 120px;
+  width: 180px;
 }
 
 .settings {

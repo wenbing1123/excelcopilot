@@ -77,6 +77,7 @@ export async function chatCompletion({ provider, config, messages, signal }) {
   const defaults = getProviderDefaults(provider);
   const baseUrl = normalizeBaseUrl(config?.baseUrl) || defaults.baseUrl;
   const apiKey = config?.apiKey || '';
+  const modelName = config?.modelName || defaults.model;
 
   if (!apiKey) {
     const err = new Error(`${provider} 未配置 apiKey`);
@@ -98,7 +99,7 @@ export async function chatCompletion({ provider, config, messages, signal }) {
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: defaults.model,
+      model: modelName,
       messages,
       stream: false,
     }),
@@ -118,4 +119,106 @@ export async function chatCompletion({ provider, config, messages, signal }) {
     raw: data,
     content: typeof content === 'string' ? content : JSON.stringify(data),
   };
+}
+
+function parseSseLines(buffer) {
+  // SSE events are separated by \n\n, but we can parse line-by-line.
+  return buffer.split(/\r?\n/);
+}
+
+/**
+ * Stream chat completions (OpenAI-compatible SSE).
+ * Calls onDelta(text) for each incremental token.
+ */
+export async function chatCompletionStream({ provider, config, messages, signal, onDelta }) {
+  const defaults = getProviderDefaults(provider);
+  const baseUrl = normalizeBaseUrl(config?.baseUrl) || defaults.baseUrl;
+  const apiKey = config?.apiKey || '';
+  const modelName = config?.modelName || defaults.model;
+
+  if (!apiKey) {
+    const err = new Error(`${provider} 未配置 apiKey`);
+    err.code = 'NO_API_KEY';
+    throw err;
+  }
+  if (!baseUrl) {
+    const err = new Error(`${provider} baseUrl 无效`);
+    err.code = 'NO_BASE_URL';
+    throw err;
+  }
+
+  const endpoint = `${baseUrl}/chat/completions`;
+
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: modelName,
+      messages,
+      stream: true,
+    }),
+    signal,
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    const err = new Error(`LLM 请求失败 (${res.status}): ${text || res.statusText}`);
+    err.status = res.status;
+    throw err;
+  }
+
+  if (!res.body) {
+    // Fallback: some environments/providers disable stream
+    const data = await res.json();
+    const content = data?.choices?.[0]?.message?.content;
+    const full = typeof content === 'string' ? content : JSON.stringify(data);
+    onDelta?.(full);
+    return { raw: data, content: full };
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+
+  let buffer = '';
+  let fullText = '';
+  let done = false;
+
+  while (!done) {
+    const { value, done: doneReading } = await reader.read();
+    done = doneReading;
+    if (value) {
+      buffer += decoder.decode(value, { stream: true });
+      const lines = parseSseLines(buffer);
+      // keep last partial line in buffer
+      buffer = lines.pop() ?? '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        if (!trimmed.startsWith('data:')) continue;
+
+        const payload = trimmed.slice('data:'.length).trim();
+        if (payload === '[DONE]') {
+          done = true;
+          break;
+        }
+
+        try {
+          const json = JSON.parse(payload);
+          const delta = json?.choices?.[0]?.delta?.content;
+          if (typeof delta === 'string' && delta.length) {
+            fullText += delta;
+            onDelta?.(delta);
+          }
+        } catch {
+          // ignore malformed JSON lines
+        }
+      }
+    }
+  }
+
+  return { raw: null, content: fullText };
 }

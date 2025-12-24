@@ -4,7 +4,7 @@
       <div id="SNContainer" class="sn-container"></div>
     </main>
 
-    <!-- draggable resizer (only when expanded) -->
+    <!-- gap + draggable handle -->
     <div
       class="resizer"
       role="separator"
@@ -17,14 +17,13 @@
     <!-- cockpit area (panel + persistent sidebar) -->
     <section class="dock" aria-label="cockpit-dock">
       <!-- main panel (collapsible) -->
-      <div v-if="!isCopilotCollapsed" class="dock__panel">
+      <div v-show="!isCopilotCollapsed" class="dock__panel">
         <AiCopilot
           ref="copilotRef"
           class="copilot"
           :sheet="sn"
           :cockpit-id="activeCockpitId"
-          @toggle-collapse="toggleCopilot"
-          @create-cockpit="createCockpit"
+          @open-history="historyOpen = true"
         />
       </div>
 
@@ -38,37 +37,46 @@
         >
           🤖
         </button>
-
-        <button class="rail-btn" type="button" title="设置" @click="openSettingsFromRail">⚙</button>
-
-        <button class="rail-btn" type="button" title="新建驾驶舱" @click="createCockpit">+</button>
-
-        <button class="rail-btn" type="button" title="历史对话" @click="historyOpen = true">🕘</button>
       </aside>
     </section>
 
-    <el-dialog v-model="historyOpen" title="历史对话" width="720px">
-      <el-alert
-        type="info"
-        show-icon
-        :closable="false"
-        title="（占位）这里后续接入每个驾驶舱的会话列表与消息预览。当前先展示已创建的驾驶舱实例。"
-        style="margin-bottom: 12px"
-      />
+    <el-dialog v-model="historyOpen" title="历史对话" width="820px">
+      <div style="display:flex; gap:8px; justify-content:space-between; margin-bottom:10px">
+        <div style="display:flex; gap:8px">
+          <el-button type="danger" plain @click="onClearAllConversations">清空全部</el-button>
+        </div>
+      </div>
 
-      <el-table :data="cockpitRows" size="small" style="width: 100%">
-        <el-table-column prop="id" label="驾驶舱 ID" />
+      <el-table :data="conversationRows" size="small" style="width: 100%" @row-click="onPickConversation">
+        <el-table-column prop="id" label="会话 ID" width="100" />
+        <el-table-column prop="title" label="标题" />
+        <el-table-column prop="updatedAt" label="更新时间" width="210" />
         <el-table-column prop="createdAt" label="创建时间" width="210" />
+        <el-table-column label="操作" width="90" align="center">
+          <template #default="scope">
+            <el-button size="small" type="danger" text @click.stop="onDeleteConversation(scope.row)">删除</el-button>
+          </template>
+        </el-table-column>
       </el-table>
+
+      <template #footer>
+        <div style="display:flex; justify-content:space-between; width:100%; align-items:center">
+          <el-text type="info" size="small">点击表格行可加载该会话到右侧消息框</el-text>
+          <el-button @click="historyOpen = false">关闭</el-button>
+        </div>
+      </template>
     </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { onMounted, onBeforeUnmount, shallowRef, ref, computed } from 'vue';
+import { onMounted, onBeforeUnmount, shallowRef, ref, computed, watch } from 'vue';
 import SheetNext from 'sheetnext';
 import 'sheetnext/dist/sheetnext.css';
 import AiCopilot from './components/AiCopilot.vue';
+import { deleteConversation, clearConversations } from './services/conversationApi.js';
+
+const copilotRef = ref(null);
 
 const sn = shallowRef(null);
 
@@ -165,40 +173,39 @@ function onResizeStart(e) {
 }
 
 const historyOpen = ref(false);
+const conversationRows = ref([]);
 
-const cockpitRows = computed(() =>
-  cockpits.value
-    .slice()
-    .reverse()
-    .map((id) => ({
-      id,
-      createdAt: formatIdTime(id),
-    })),
-);
-
-function formatIdTime(id) {
-  const m = String(id).match(/cockpit-(\d+)/);
-  if (!m) return '';
-  const ts = Number(m[1]);
-  if (!Number.isFinite(ts)) return '';
+async function refreshConversationRows() {
   try {
-    return new Date(ts).toLocaleString();
-  } catch {
-    return '';
+    const rows = await copilotRef.value?.listConversations?.();
+    conversationRows.value = Array.isArray(rows) ? rows : [];
+  } catch (e) {
+    conversationRows.value = [];
   }
 }
 
-const copilotRef = ref(null);
-
-async function openSettingsFromRail() {
-  if (isCopilotCollapsed.value) {
-    isCopilotCollapsed.value = false;
-    saveCollapsed();
-    // 等待驾驶舱组件挂载
-    await Promise.resolve();
-  }
-  copilotRef.value?.openSettings?.();
+async function onPickConversation(row) {
+  if (!row?.id) return;
+  // 关键：确保 copilotRef 已就绪
+  await copilotRef.value?.loadConversationById?.(row.id);
+  historyOpen.value = false;
 }
+
+async function onDeleteConversation(row) {
+  if (!row?.id) return;
+  await deleteConversation(row.id);
+  await refreshConversationRows();
+}
+
+async function onClearAllConversations() {
+  await clearConversations();
+  await refreshConversationRows();
+}
+
+
+watch(historyOpen, (open) => {
+  if (open) refreshConversationRows();
+});
 
 onMounted(() => {
   const el = document.querySelector('#SNContainer');
@@ -219,7 +226,8 @@ onBeforeUnmount(() => {
   width: 100vw;
   height: 100vh;
   display: grid;
-  grid-template-columns: 1fr 6px calc(var(--panel-width, 420px) + var(--rail-width, 36px));
+  /* 第三列专门给驾驶舱（panel + rail），保证 rail 永远在最右 */
+  grid-template-columns: 1fr 12px calc(var(--panel-width, 420px) + var(--rail-width, 36px));
   overflow: hidden;
 }
 
@@ -236,18 +244,23 @@ onBeforeUnmount(() => {
 
 .resizer {
   cursor: col-resize;
-  background: transparent;
+  background: rgba(0, 0, 0, 0.02);
   position: relative;
 }
 
 .resizer::before {
   content: '';
   position: absolute;
-  left: 2px;
+  left: 50%;
   top: 0;
   bottom: 0;
   width: 2px;
+  transform: translateX(-50%);
   background: rgba(0, 0, 0, 0.06);
+}
+
+.resizer:hover {
+  background: rgba(64, 158, 255, 0.06);
 }
 
 .resizer:hover::before {
@@ -256,6 +269,7 @@ onBeforeUnmount(() => {
 
 .resizer--disabled {
   cursor: default;
+  background: rgba(0, 0, 0, 0.01);
 }
 
 .resizer--disabled::before,
@@ -266,18 +280,23 @@ onBeforeUnmount(() => {
 .dock {
   width: calc(var(--panel-width, 420px) + var(--rail-width, 36px));
   height: 100%;
-  display: grid;
-  grid-template-columns: var(--panel-width, 420px) var(--rail-width, 36px);
+  display: flex;
   overflow: hidden;
   justify-self: end;
+  align-items: stretch;
 }
 
 .dock__panel {
   height: 100%;
   min-width: 0;
+  overflow: hidden;
+  display: flex;
+  flex: 1;
+  width: var(--panel-width, 420px);
 }
 
 .dock__rail {
+  flex: 0 0 var(--rail-width, 36px);
   height: 100%;
   border-left: 1px solid rgba(0, 0, 0, 0.06);
   background: #ffffff;
@@ -314,6 +333,9 @@ onBeforeUnmount(() => {
 
 .copilot {
   height: 100%;
-  min-width: 280px;
+  width: 100%;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
 }
 </style>
