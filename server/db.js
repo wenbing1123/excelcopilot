@@ -99,6 +99,20 @@ export async function getDb() {
     );
   `);
 
+  // ======================
+  // Workbook snapshots (SheetNext.getData())
+  // ======================
+  db.run(`
+    CREATE TABLE IF NOT EXISTS workbook_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      workbookKey TEXT NOT NULL UNIQUE,
+      version INTEGER NOT NULL DEFAULT 0,
+      dataJson TEXT NOT NULL,
+      createdAt TEXT NOT NULL DEFAULT (datetime('now')),
+      updatedAt TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+
   saveDb();
   return db;
 }

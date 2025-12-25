@@ -341,6 +341,97 @@ export function createApiRouter() {
     sendJson(res, 200, { activeSystemPromptId: id });
   });
 
+  // ======================
+  // Workbook storage API
+  // ======================
+
+  // NOTE: SheetNext.getData() 的数据结构在不同版本/构建中可能不同。
+  // 为了保证持久化稳定，这里不做“必须包含某字段(sheets等)”的强校验，
+  // 只保证：1) 是对象 2) 可 JSON 序列化 3) size 在限制内。
+
+  function isSerializableObject(obj) {
+    return !!obj && typeof obj === 'object' && !Array.isArray(obj);
+  }
+
+  // Get latest workbook snapshot
+  router.get('/workbook/latest', async (req, res) => {
+    const workbookKey = String(req.query?.key || 'default');
+    const db = await getDb();
+    const row = dbGet(db, 'SELECT workbookKey, version, dataJson, updatedAt FROM workbook_snapshots WHERE workbookKey = ?', [workbookKey]);
+    if (!row) return sendJson(res, 200, null);
+
+    let data = null;
+    try {
+      data = JSON.parse(row.dataJson);
+    } catch {
+      // corrupted json: treat as missing
+      return sendJson(res, 200, null);
+    }
+
+    sendJson(res, 200, {
+      workbookKey: row.workbookKey,
+      version: Number(row.version) || 0,
+      data,
+      updatedAt: row.updatedAt,
+    });
+  });
+
+  // Delete workbook snapshot
+  router.delete('/workbook/snapshot', async (req, res) => {
+    const workbookKey = String(req.query?.key || 'default');
+    const db = await getDb();
+    const existing = dbGet(db, 'SELECT workbookKey FROM workbook_snapshots WHERE workbookKey = ?', [workbookKey]);
+    if (!existing) {
+      res.statusCode = 204;
+      return res.end();
+    }
+    dbRun(db, 'DELETE FROM workbook_snapshots WHERE workbookKey = ?', [workbookKey]);
+    res.statusCode = 204;
+    res.end();
+  });
+
+  // Save workbook snapshot (upsert)
+  router.post('/workbook/save', async (req, res) => {
+    const { workbookKey = 'default', data, version } = req.body || {};
+    const key = String(workbookKey || 'default');
+    if (!isSerializableObject(data)) return sendError(res, 400, 'data required');
+
+    // hard limit to reduce accidental huge payloads
+    let dataJson = '';
+    try {
+      dataJson = JSON.stringify(data);
+    } catch {
+      return sendError(res, 400, 'data not serializable');
+    }
+
+    const MAX_BYTES = 2 * 1024 * 1024; // 2MB
+    if (Buffer.byteLength(dataJson, 'utf8') > MAX_BYTES) {
+      return sendError(res, 413, 'workbook data too large (limit 2MB)');
+    }
+
+    const db = await getDb();
+    const existing = dbGet(db, 'SELECT workbookKey, version FROM workbook_snapshots WHERE workbookKey = ?', [key]);
+
+    if (!existing) {
+      dbRun(db, "INSERT INTO workbook_snapshots (workbookKey, version, dataJson) VALUES (?, ?, ?)", [key, 1, dataJson]);
+      return sendJson(res, 201, { ok: true, workbookKey: key, version: 1 });
+    }
+
+    const currentVersion = Number(existing.version) || 0;
+    const clientVersion = version == null ? null : Number(version);
+
+    // Treat missing/0 as "no optimistic lock" (force save). This avoids startup/save loops
+    // when there is already a snapshot in DB but the client hasn't loaded the version yet.
+    const hasOptimisticLock = clientVersion != null && Number.isFinite(clientVersion) && clientVersion > 0;
+    if (hasOptimisticLock && clientVersion !== currentVersion) {
+      return sendJson(res, 409, { error: 'version conflict', workbookKey: key, currentVersion });
+    }
+
+    const nextVersion = currentVersion + 1;
+    dbRun(db, "UPDATE workbook_snapshots SET dataJson=?, version=?, updatedAt=datetime('now') WHERE workbookKey=?", [dataJson, nextVersion, key]);
+    return sendJson(res, 200, { ok: true, workbookKey: key, version: nextVersion });
+  });
+
   return router;
 }
 

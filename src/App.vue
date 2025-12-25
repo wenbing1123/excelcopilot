@@ -37,6 +37,7 @@
         >
           🤖
         </button>
+        <!-- 保存按钮移到 SheetNext 工具栏（见 injectWorkbookSaveButtonToSheetNextToolbar） -->
       </aside>
     </section>
 
@@ -66,6 +67,8 @@
         </div>
       </template>
     </el-dialog>
+
+    <div v-if="saveStatusText" class="save-status">{{ saveStatusText }}</div>
   </div>
 </template>
 
@@ -75,10 +78,15 @@ import SheetNext from 'sheetnext';
 import 'sheetnext/dist/sheetnext.css';
 import AiCopilot from './components/AiCopilot.vue';
 import { deleteConversation, clearConversations } from './services/conversationApi.js';
+import { getWorkbookLatest, saveWorkbookSnapshot } from './services/workbookStorageApi.js';
 
 const copilotRef = ref(null);
 
 const sn = shallowRef(null);
+
+// Observers / disposers
+let sheetTabCloseObserver = null;
+let removeSaveBtnObserver = null;
 
 // --- keep SheetNext layout intact; only disable built-in AI chat toggle ---
 function markBuiltInSheetNextAiEntry(root = document) {
@@ -324,6 +332,446 @@ async function onClearAllConversations() {
   await refreshConversationRows();
 }
 
+// NOTE: The file accidentally contained duplicated blocks (workbook persistence + sheet tab close helpers)
+// due to iterative edits. Keep only ONE implementation of:
+// - safeGetSheetNameFromTabEl
+// - installSheetCloseButtons
+// - uninstallSheetCloseButtons
+// - WORKBOOK_KEY + persistence state (workbookVersion, lastSavedHash, timers)
+// - stableHashJson / scheduleWorkbookSave / persistWorkbookNow / restoreWorkbookOnce
+// Remove the duplicated copies below.
+
+// (The following duplicated sections have been removed.)
+
+function safeGetSheetNameFromTabEl(tabEl) {
+  if (!tabEl) return null;
+  // Try common patterns: data-name / title / text
+  const dataName = tabEl.getAttribute?.('data-name') || tabEl.getAttribute?.('data-sheet') || tabEl.getAttribute?.('data-sheet-name');
+  if (dataName) return String(dataName).trim();
+
+  const title = tabEl.getAttribute?.('title');
+  if (title) return String(title).trim();
+
+  const text = tabEl.textContent;
+  if (text) {
+    // tab text may include close icon; keep only first token-like name
+    return String(text).replace(/\s+/g, ' ').trim();
+  }
+  return null;
+}
+
+function installSheetTabCloseButtons(snInstance, containerEl, { onClosed } = {}) {
+  if (!snInstance || !containerEl) return;
+
+  const utils = snInstance?.Utils || snInstance?.utils;
+
+  const injectOnce = () => {
+    // Heuristics for SheetNext tab strip root
+    const roots = [
+      containerEl.querySelector('.sn-sheet-tab'),
+      containerEl.querySelector('.sn-sheet-tabs'),
+      containerEl.querySelector('.sn-sheetbar'),
+      containerEl.querySelector('.sn-sheet'),
+      containerEl.querySelector('[class*="sheet"][class*="tab"]'),
+    ].filter(Boolean);
+
+    const root = roots[0];
+    if (!root) return;
+
+    // candidate tab items
+    const tabs = Array.from(
+      root.querySelectorAll('[data-sheet-name], [data-name], .sn-sheet-item, .sn-sheet-tab-item, li, .sn-tab, .sn-sheet-name')
+    );
+
+    for (const t of tabs) {
+      if (!(t instanceof HTMLElement)) continue;
+      // avoid injecting into container lists; only leaf-ish nodes
+      if (t.querySelector?.('.snx-close-btn')) continue;
+
+      // Create close button
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'snx-close-btn';
+      btn.textContent = '×';
+      btn.title = '关闭工作表';
+
+      btn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+
+        const name = safeGetSheetNameFromTabEl(t);
+        if (!name) return;
+
+        // Confirm
+        if (utils?.modal) {
+          try {
+            await utils.modal({
+              title: '关闭工作表',
+              content: `确定要关闭工作表 “${name}” 吗？`,
+              confirmText: '关闭',
+              cancelText: '取消',
+            });
+          } catch {
+            return;
+          }
+        }
+
+        try {
+          // simplest: call instance.delSheet
+          if (typeof snInstance?.delSheet === 'function') {
+            snInstance.delSheet(name);
+            snInstance?.render?.();
+            snInstance?.refresh?.();
+            if (typeof snInstance?.r === 'function') snInstance.r();
+          }
+          onClosed?.(name);
+        } catch {
+          // ignore
+        }
+      });
+
+      t.appendChild(btn);
+      t.classList.add('snx-tab-with-close');
+    }
+  };
+
+  injectOnce();
+
+  sheetTabCloseObserver = new MutationObserver(() => injectOnce());
+  sheetTabCloseObserver.observe(containerEl, { childList: true, subtree: true });
+}
+
+function uninstallSheetTabCloseButtons() {
+  if (sheetTabCloseObserver) {
+    sheetTabCloseObserver.disconnect();
+    sheetTabCloseObserver = null;
+  }
+  // best-effort remove injected buttons
+  try {
+    document.querySelectorAll('#SNContainer .snx-close-btn').forEach((b) => b.remove());
+  } catch {
+    // ignore
+  }
+}
+
+// ======================
+// Workbook persistence (server-side)
+// Workaround: sheetnext@0.1.9 may return {} for getData(),
+// so we persist a "sheetnext-lite" snapshot by reading cell values.
+// ======================
+const WORKBOOK_KEY = 'default';
+let workbookSaveTimer = null;
+let workbookVersion = 0;
+let lastSavedHash = '';
+let workbookPollTimer = null;
+let saveInFlight = false;
+let saveQueued = false;
+
+function stableHashJson(obj) {
+  try {
+    return JSON.stringify(obj);
+  } catch {
+    return '';
+  }
+}
+
+function isPlainObject(x) {
+  return !!x && typeof x === 'object' && !Array.isArray(x);
+}
+
+function isLiteSnapshot(data) {
+  return isPlainObject(data) && data.__format === 'sheetnext-lite' && Array.isArray(data.sheets);
+}
+
+function workbookSnapshotFromSheets(wb) {
+  try {
+    const sheets = Array.isArray(wb?.sheets) ? wb.sheets : Array.isArray(wb?.workbook?.sheets) ? wb.workbook.sheets : [];
+    const activeSheetName = wb?.activeSheet?.name || sheets?.[0]?.name || 'Sheet1';
+
+    const out = {
+      __format: 'sheetnext-lite',
+      workbookName: typeof wb?.workbookName === 'string' ? wb.workbookName : 'SheetNext',
+      activeSheetName,
+      sheets: [],
+      ts: Date.now(),
+    };
+
+    for (const s of sheets) {
+      if (!s) continue;
+      const name = String(s?.name || 'Sheet');
+
+      // Bound the snapshot to keep payload reasonable.
+      const maxR = 200;
+      const maxC = 50;
+
+      const table = [];
+      for (let r = 0; r < maxR; r++) {
+        const row = [];
+        let rowHasAny = false;
+        for (let c = 0; c < maxC; c++) {
+          let v = '';
+          try {
+            const cell = typeof s.getCell === 'function' ? s.getCell(r, c) : s?.rows?.[r]?.cells?.[c];
+            v = cell?.editVal ?? cell?.showVal ?? '';
+          } catch {
+            v = '';
+          }
+          if (v == null) v = '';
+          if (v !== '') rowHasAny = true;
+          row.push(v);
+        }
+        table.push(row);
+        // small optimization: stop if we have a long tail of empty rows
+        if (!rowHasAny && r > 30) {
+          const tailEmpty = table.slice(-10).every((rr) => rr.every((x) => x === '' || x == null));
+          if (tailEmpty) break;
+        }
+      }
+
+      // Trim empty trailing rows
+      while (table.length && table[table.length - 1].every((x) => x === '' || x == null)) table.pop();
+
+      // Trim empty trailing columns (based on all rows)
+      let maxUsedC = 0;
+      for (const rr of table) {
+        for (let c = rr.length - 1; c >= 0; c--) {
+          if (rr[c] !== '' && rr[c] != null) {
+            maxUsedC = Math.max(maxUsedC, c + 1);
+            break;
+          }
+        }
+      }
+      for (const rr of table) rr.length = Math.max(0, maxUsedC);
+
+      out.sheets.push({
+        name,
+        hidden: !!s.hidden,
+        defaultRowHeight: typeof s.defaultRowHeight === 'number' ? s.defaultRowHeight : null,
+        defaultColWidth: typeof s.defaultColWidth === 'number' ? s.defaultColWidth : null,
+        table,
+      });
+    }
+
+    return out;
+  } catch {
+    return { __format: 'sheetnext-lite', workbookName: 'SheetNext', activeSheetName: 'Sheet1', sheets: [], ts: Date.now() };
+  }
+}
+
+function getWorkbookDataBestEffort(wb) {
+  // Prefer native getData if it returns non-empty object
+  try {
+    if (typeof wb?.getData === 'function') {
+      const d = wb.getData();
+      if (isPlainObject(d) && Object.keys(d).length) return d;
+    }
+  } catch {}
+
+  // Some builds wrap the workbook
+  try {
+    const alt = wb?.workbook || wb?.Workbook || wb?.core || wb?.app;
+    if (alt && typeof alt.getData === 'function') {
+      const d = alt.getData();
+      if (isPlainObject(d) && Object.keys(d).length) return d;
+    }
+  } catch {}
+
+  // Fallback to our lite snapshot
+  return workbookSnapshotFromSheets(wb);
+}
+
+function scheduleWorkbookSave() {
+  if (!sn.value) return;
+  if (workbookSaveTimer) clearTimeout(workbookSaveTimer);
+  workbookSaveTimer = setTimeout(() => {
+    workbookSaveTimer = null;
+    persistWorkbookNow().catch(() => {});
+  }, 800);
+}
+
+async function persistWorkbookNow(force = false) {
+  if (saveInFlight) {
+    saveQueued = saveQueued || force;
+    return;
+  }
+  saveInFlight = true;
+  try {
+    const wb = sn.value;
+    if (!wb) return;
+
+    const data = getWorkbookDataBestEffort(wb);
+    if (!isPlainObject(data)) return;
+
+    const hash = stableHashJson(data);
+    if (!hash) return;
+    if (!force && hash === lastSavedHash) return;
+
+    try {
+      const resp = await saveWorkbookSnapshot({ workbookKey: WORKBOOK_KEY, data, version: workbookVersion });
+      workbookVersion = Number(resp?.version) || workbookVersion;
+      lastSavedHash = hash;
+    } catch (e) {
+      if (e?.status === 409 && e?.data?.error === 'version conflict') {
+        const serverVer = Number(e?.data?.currentVersion);
+        if (Number.isFinite(serverVer)) workbookVersion = serverVer;
+        const resp2 = await saveWorkbookSnapshot({ workbookKey: WORKBOOK_KEY, data, version: workbookVersion });
+        workbookVersion = Number(resp2?.version) || workbookVersion;
+        lastSavedHash = hash;
+      } else {
+        throw e;
+      }
+    }
+  } finally {
+    saveInFlight = false;
+    const queuedForce = saveQueued;
+    saveQueued = false;
+    if (queuedForce) setTimeout(() => persistWorkbookNow(true).catch(() => {}), 0);
+  }
+}
+
+async function applyLiteSnapshot(wb, snap) {
+  if (!wb || !isLiteSnapshot(snap)) return;
+
+  const ensureSheet = (name) => {
+    try {
+      if (typeof wb.getSheetByName === 'function') {
+        const s = wb.getSheetByName(name);
+        if (s) return s;
+      }
+      if (typeof wb.addSheet === 'function') return wb.addSheet(name);
+    } catch {}
+    return null;
+  };
+
+  for (const s0 of snap.sheets) {
+    const name = String(s0?.name || 'Sheet');
+    const sheet = ensureSheet(name);
+    if (!sheet) continue;
+
+    try {
+      if (typeof s0.defaultRowHeight === 'number') sheet.defaultRowHeight = s0.defaultRowHeight;
+      if (typeof s0.defaultColWidth === 'number') sheet.defaultColWidth = s0.defaultColWidth;
+      sheet.hidden = !!s0.hidden;
+    } catch {}
+
+    const table = Array.isArray(s0.table) ? s0.table : [];
+    if (!table.length) continue;
+
+    if (typeof sheet.insertTable === 'function') {
+      try {
+        sheet.insertTable(table, 'A1');
+        continue;
+      } catch {
+        // fallback below
+      }
+    }
+
+    // Fallback: cell loop
+    for (let r = 0; r < table.length; r++) {
+      const row = table[r];
+      if (!Array.isArray(row)) continue;
+      for (let c = 0; c < row.length; c++) {
+        try {
+          const cell = sheet.getCell(r, c);
+          cell.editVal = row[c];
+        } catch {}
+      }
+    }
+  }
+
+  // Activate sheet
+  try {
+    if (snap.activeSheetName && typeof wb.setActiveSheet === 'function') wb.setActiveSheet(snap.activeSheetName);
+  } catch {}
+
+  try {
+    if (typeof wb.r === 'function') wb.r();
+    else {
+      wb?.render?.();
+      wb?.refresh?.();
+    }
+  } catch {}
+}
+
+async function restoreWorkbookOnce() {
+  const wb = sn.value;
+  if (!wb) return;
+
+  try {
+    const latest = await getWorkbookLatest();
+    if (!latest || !latest.data) return;
+
+    workbookVersion = Number(latest.version) || 0;
+
+    // Lite snapshot: restore by rebuilding cells
+    if (isLiteSnapshot(latest.data)) {
+      await applyLiteSnapshot(wb, latest.data);
+      lastSavedHash = stableHashJson(getWorkbookDataBestEffort(wb));
+      return;
+    }
+
+    // Prefer native setData when available
+    const target = typeof wb.setData === 'function' ? wb : wb.workbook || wb.Workbook || wb?.core || wb?.app;
+    if (target && typeof target.setData === 'function') {
+      const res = target.setData(latest.data);
+      if (res === false) {
+        try {
+          wb?.Utils?.msg?.('恢复失败：JSON格式不正确或版本不匹配');
+        } catch {}
+        return;
+      }
+      lastSavedHash = stableHashJson(getWorkbookDataBestEffort(wb));
+    }
+  } catch (e) {
+    console.warn('[workbook restore] failed:', e);
+  }
+}
+
+function injectWorkbookSaveButtonToSheetNextToolbar(containerEl) {
+  if (!containerEl) return () => {};
+
+  const injectOnce = () => {
+    const toolbars = [
+      containerEl.querySelector('.sn-toolbar'),
+      containerEl.querySelector('.sn-tool'),
+      containerEl.querySelector('[class*="toolbar"]'),
+    ].filter(Boolean);
+
+    const root = toolbars[0];
+    if (!root) return;
+
+    if (root.querySelector('.snx-save-btn')) return;
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'snx-save-btn';
+    btn.title = '保存';
+    btn.textContent = '💾';
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      saveStatusText.value = '正在保存…';
+      persistWorkbookNow(true)
+        .then(() => {
+          saveStatusText.value = '已保存';
+          setTimeout(() => (saveStatusText.value = ''), 1500);
+        })
+        .catch((err) => {
+          console.warn('[manual save] failed:', err);
+          saveStatusText.value = '保存失败';
+          setTimeout(() => (saveStatusText.value = ''), 2000);
+        });
+    });
+
+    // Put it at the left
+    root.prepend(btn);
+  };
+
+  injectOnce();
+  const obs = new MutationObserver(() => injectOnce());
+  obs.observe(containerEl, { childList: true, subtree: true });
+  return () => obs.disconnect();
+}
 
 watch(historyOpen, (open) => {
   if (open) refreshConversationRows();
@@ -333,6 +781,43 @@ onMounted(() => {
   const el = document.querySelector('#SNContainer');
   if (!el) return;
   sn.value = new SheetNext(el);
+  window.sn = sn.value;
+
+  // Wait for SheetNext internal init before calling getData/setData.
+  (async () => {
+    await waitTwoFrames();
+
+    // Restore workbook content from server snapshot (best-effort) before user edits.
+    await restoreWorkbookOnce();
+
+    // Start auto-saving after restore attempt.
+    if (workbookPollTimer) clearInterval(workbookPollTimer);
+    workbookPollTimer = setInterval(() => {
+      try {
+        const wb = sn.value;
+        const data = getWorkbookDataBestEffort(wb);
+        const hash = stableHashJson(data);
+        if (hash && hash !== lastSavedHash) scheduleWorkbookSave();
+      } catch {
+        // ignore
+      }
+    }, 1500);
+
+    // After initial render settles, do one immediate save so a refresh won't lose the new workbook.
+    try {
+      await persistWorkbookNow(true);
+    } catch {
+      // ignore
+    }
+  })();
+
+  // 将保存按钮放到 SheetNext 工具栏
+  try {
+    const cleanup = injectWorkbookSaveButtonToSheetNextToolbar(el);
+    if (typeof cleanup === 'function') removeSaveBtnObserver = cleanup;
+  } catch {
+    // ignore
+  }
 
   // Dev helper: expose instance for console debugging / tool verification
   try {
@@ -355,9 +840,88 @@ onMounted(() => {
   requestAnimationFrame(() => {
     markBuiltInSheetNextAiEntry(el);
   });
+
+  // --- Default sheet look & feel ---
+  try {
+    const s = sn.value?.activeSheet;
+    if (s) {
+      // Clear any accidental default merges
+      try {
+        if (Array.isArray(s.merges) && s.merges.length) s.merges = [];
+        // best-effort: unmerge the top-left cell in case a big merge exists
+        if (typeof s.unMergeCells === 'function') {
+          try { s.unMergeCells('A1'); } catch {}
+        }
+      } catch {
+        // ignore
+      }
+
+      // Default metrics
+      s.defaultRowHeight = 19.5;
+      s.defaultColWidth = 110;
+
+      // Mild default header styling (best-effort; doesn't assume too much)
+      // Make first row look like a header if it exists.
+      if (typeof s.getRow === 'function') {
+        try {
+          const r0 = s.getRow(0);
+          if (r0) {
+            r0.height = 26;
+            r0.font = { ...(r0.font || {}), bold: true };
+            r0.fill = { ...(r0.fill || {}), fgColor: '#F5F7FA' };
+            r0.alignment = { ...(r0.alignment || {}), horizontal: 'center', vertical: 'middle' };
+          }
+        } catch {
+          // ignore
+        }
+      }
+    }
+
+    // Rerender once after applying defaults
+    if (typeof sn.value?.r === 'function') sn.value.r();
+    else {
+      sn.value?.render?.();
+      sn.value?.refresh?.();
+    }
+  } catch {
+    // ignore
+  }
+
+  // After initial render settles, do one immediate save so a refresh won't lose the new workbook.
+  // (Also fixes "first save not happening" for users who open and immediately refresh.)
+  (async () => {
+    try {
+      await waitTwoFrames();
+      await persistWorkbookNow();
+    } catch {
+      // ignore
+    }
+  })();
+
+  // Install close buttons on bottom sheet tabs (DOM injection, best-effort).
+  try {
+    installSheetTabCloseButtons(sn.value, el, {
+      onClosed: () => {
+        // keep AI cockpit anchor in sync if visible
+        try {
+          copilotRef.value?.refreshAnchorFromSelection?.();
+        } catch {}
+      },
+    });
+  } catch {
+    // ignore
+  }
 });
 
 onBeforeUnmount(() => {
+  if (typeof removeSaveBtnObserver === 'function') removeSaveBtnObserver();
+  removeSaveBtnObserver = null;
+  if (workbookSaveTimer) clearTimeout(workbookSaveTimer);
+  if (workbookPollTimer) {
+    clearInterval(workbookPollTimer);
+    workbookPollTimer = null;
+  }
+  persistWorkbookNow().catch(() => {});
   stopRemoveObserver();
   if (typeof removeAiChatClickBlocker === 'function') removeAiChatClickBlocker();
   if (typeof restoreShowAiChat === 'function') restoreShowAiChat();
@@ -365,7 +929,37 @@ onBeforeUnmount(() => {
   if (inst && typeof inst.destroy === 'function') inst.destroy();
   else if (inst && typeof inst.dispose === 'function') inst.dispose();
   sn.value = null;
+
+  uninstallSheetTabCloseButtons();
 });
+
+// Save UI
+const saveStatusText = ref('');
+
+async function onManualSave() {
+  saveStatusText.value = '正在保存…';
+  try {
+    await persistWorkbookNow(true);
+    saveStatusText.value = '已保存';
+  } catch (e) {
+    const keys = e?.data?.hint?.keys;
+    if (Array.isArray(keys) && keys.length) {
+      console.warn('[workbook save] invalid workbook data keys:', keys);
+      saveStatusText.value = `保存失败：invalid workbook data（keys: ${keys.join(', ')}）`;
+    } else {
+      console.warn('[workbook save] failed:', e);
+      saveStatusText.value = `保存失败：${String(e?.message || e)}`;
+    }
+  }
+  setTimeout(() => {
+    if (saveStatusText.value) saveStatusText.value = '';
+  }, 2500);
+}
+
+async function waitTwoFrames() {
+  await new Promise((r) => requestAnimationFrame(() => r()));
+  await new Promise((r) => requestAnimationFrame(() => r()));
+}
 </script>
 
 <style scoped>
@@ -459,6 +1053,7 @@ onBeforeUnmount(() => {
   box-sizing: border-box;
   width: var(--rail-width, 36px);
   justify-content: flex-start;
+  position: relative;
 }
 
 .rail-btn {
@@ -488,5 +1083,64 @@ onBeforeUnmount(() => {
   flex: 1;
   min-width: 0;
   overflow: hidden;
+}
+
+.snx-close-btn {
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  margin-left: 4px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: rgba(0, 0, 0, 0.54);
+  font-size: 16px;
+  line-height: 1;
+}
+
+.snx-close-btn:hover {
+  color: rgba(64, 158, 255, 0.85);
+}
+
+.snx-tab-with-close {
+  position: relative;
+  padding-right: 20px;
+}
+
+.snx-tab-with-close .snx-close-btn {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  transform: translateY(-50%);
+}
+
+.save-status {
+  position: absolute;
+  bottom: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 12px;
+  color: rgba(0, 0, 0, 0.55);
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  padding: 4px 8px;
+  border-radius: 8px;
+  white-space: nowrap;
+}
+
+:global(.snx-save-btn) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-right: 6px;
+  font-size: 14px;
+  line-height: 1;
+  user-select: none;
+}
+
+:global(.snx-save-btn:hover) {
+  filter: brightness(1.05);
 }
 </style>

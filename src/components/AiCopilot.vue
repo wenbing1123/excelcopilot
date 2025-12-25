@@ -171,22 +171,39 @@
               style="margin-bottom: 12px"
             />
 
+            <!-- Search and filter -->
+            <div style="margin-bottom: 10px">
+              <el-input
+                v-model="toolSearch"
+                placeholder="搜索工具"
+                clearable
+                suffix-icon="el-icon-search"
+                style="max-width: 300px"
+              />
+            </div>
+
             <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom: 10px">
               <el-switch v-model="toolsEnableAll" active-text="全部启用" inactive-text="自定义" />
               <el-button size="small" @click="selectAllTools" :disabled="toolsEnableAll">全选</el-button>
               <el-button size="small" @click="clearAllTools" :disabled="toolsEnableAll">全不选</el-button>
             </div>
 
-            <el-checkbox-group v-model="selectedToolNames" :disabled="toolsEnableAll">
-              <div style="display:flex; flex-direction:column; gap:8px">
-                <el-checkbox v-for="t in sheetToolDefinitions" :key="t.name" :label="t.name">
-                  <div style="display:flex; flex-direction:column">
-                    <div style="font-weight:600">{{ t.label }}</div>
-                    <div style="color: var(--el-text-color-secondary); font-size:12px">{{ t.desc }}</div>
+            <!-- Grouped and filtered tools list -->
+            <div class="tool-list">
+              <div v-for="group in groupedToolDefinitions" :key="group.category" style="margin-bottom: 12px">
+                <div style="font-weight: 600; margin-bottom: 4px">{{ group.label }}</div>
+                <el-checkbox-group v-model="selectedToolNames" :disabled="toolsEnableAll">
+                  <div style="display:flex; flex-direction:column; gap:8px">
+                    <el-checkbox v-for="t in group.items" :key="t.name" :label="t.name">
+                      <div style="display:flex; flex-direction:column">
+                        <div style="font-weight:600">{{ t.label }}</div>
+                        <div style="color: var(--el-text-color-secondary); font-size:12px">{{ t.desc }}</div>
+                      </div>
+                    </el-checkbox>
                   </div>
-                </el-checkbox>
+                </el-checkbox-group>
               </div>
-            </el-checkbox-group>
+            </div>
           </template>
 
           <template v-else-if="settingsSection === 'memory'">
@@ -330,22 +347,39 @@
         style="margin-bottom: 12px"
       />
 
+      <!-- Search and filter -->
+      <div style="margin-bottom: 10px">
+        <el-input
+          v-model="toolSearch"
+          placeholder="搜索工具"
+          clearable
+          suffix-icon="el-icon-search"
+          style="max-width: 300px"
+        />
+      </div>
+
       <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom: 10px">
         <el-switch v-model="toolsEnableAll" active-text="全部启用" inactive-text="自定义" />
         <el-button size="small" @click="selectAllTools" :disabled="toolsEnableAll">全选</el-button>
         <el-button size="small" @click="clearAllTools" :disabled="toolsEnableAll">全不选</el-button>
       </div>
 
-      <el-checkbox-group v-model="selectedToolNames" :disabled="toolsEnableAll">
-        <div style="display:flex; flex-direction:column; gap:8px">
-          <el-checkbox v-for="t in sheetToolDefinitions" :key="t.name" :label="t.name">
-            <div style="display:flex; flex-direction:column">
-              <div style="font-weight:600">{{ t.label }}</div>
-              <div style="color: var(--el-text-color-secondary); font-size:12px">{{ t.desc }}</div>
+      <!-- Grouped and filtered tools list -->
+      <div class="tool-list">
+        <div v-for="group in groupedToolDefinitions" :key="group.category" style="margin-bottom: 12px">
+          <div style="font-weight: 600; margin-bottom: 4px">{{ group.label }}</div>
+          <el-checkbox-group v-model="selectedToolNames" :disabled="toolsEnableAll">
+            <div style="display:flex; flex-direction:column; gap:8px">
+              <el-checkbox v-for="t in group.items" :key="t.name" :label="t.name">
+                <div style="display:flex; flex-direction:column">
+                  <div style="font-weight:600">{{ t.label }}</div>
+                  <div style="color: var(--el-text-color-secondary); font-size:12px">{{ t.desc }}</div>
+                </div>
+              </el-checkbox>
             </div>
-          </el-checkbox>
+          </el-checkbox-group>
         </div>
-      </el-checkbox-group>
+      </div>
 
       <template #footer>
         <div style="display:flex; justify-content:flex-end; gap:8px">
@@ -372,6 +406,7 @@ import {
   setActiveSystemPrompt,
 } from '../services/systemPromptApi.js';
 import { getSheetTools } from '../services/sheetTools.js';
+import { executeSheetToolCall } from '../services/sheetExecutor.js';
 import { loadToolSettings, saveToolSettings } from '../services/toolSettings.js';
 
 // NOTE: This file previously accumulated duplicated state blocks.
@@ -410,28 +445,59 @@ const mode = ref(modes[0]);
 const requesting = ref(false);
 const showPromptDebug = ref(false);
 
+// ---------- Scroll helpers ----------
+async function scrollToBottom() {
+  await nextTick();
+  // 优先使用 el-scrollbar 的 API
+  try {
+    const sb = scrollbarRef.value;
+    if (sb?.setScrollTop) {
+      const wrap = sb?.wrapRef;
+      const top = wrap?.scrollHeight ?? 999999;
+      sb.setScrollTop(top);
+      return;
+    }
+  } catch {
+    // ignore
+  }
+  // fallback
+  bottomRef.value?.scrollIntoView?.({ block: 'end' });
+}
+
 // ---------- Context (anchor) ----------
 const targetSheetName = ref('');
 const anchorCell = ref('A1');
 const lockToActiveSheet = ref(true);
+const includeSheetContext = ref(true);
+
 const pickedHint = computed(() => {
   return hasSheet.value
     ? `目标：${targetSheetName.value || '(活动表)'}!${anchorCell.value || 'A1'}`
     : 'SheetNext 未就绪';
 });
 
-function refreshAnchorFromSelection() {
-  // MVP: best-effort; if sheetnext exposes activeSheet/activeCell use it, else keep defaults.
+async function refreshAnchorFromSelection() {
+  // Use tools so we can reliably read activeCell and convert to A1.
   try {
-    const s = props.sheet?.activeSheet;
-    if (s?.name) targetSheetName.value = s.name;
-    const cell = s?.activeCell;
-    if (cell && typeof cell === 'object') {
-      // cell like {r,c}
-      // we don't have a reliable num->A1 here; keep A1.
+    // 1) 当前活动表 info（含 activeCell）
+    const sheetInfo = await executeSheetToolCall(props.sheet, {
+      function: { name: 'sheet_get_info', arguments: '{}' },
+    });
+    const activeName = sheetInfo?.info?.name;
+    if (activeName) targetSheetName.value = activeName;
+
+    // 2) activeCell -> A1
+    const cellNum = sheetInfo?.info?.activeCell;
+    if (cellNum && typeof cellNum === 'object' && Number.isFinite(cellNum.r) && Number.isFinite(cellNum.c)) {
+      const a1Res = await executeSheetToolCall(props.sheet, {
+        function: { name: 'utils_cell_num_to_str', arguments: JSON.stringify({ cellNum }) },
+      });
+      const a1 = a1Res?.result;
+      if (typeof a1 === 'string' && a1.trim()) anchorCell.value = a1.trim();
     }
   } catch {
-    // ignore
+    // fallback: keep existing anchor
+    if (!anchorCell.value) anchorCell.value = 'A1';
   }
 }
 
@@ -573,12 +639,116 @@ async function removePromptDb() {
 const toolDialogOpen = ref(false);
 const toolsEnableAll = ref(true);
 const selectedToolNames = ref([]);
+const toolSearch = ref('');
+
+const TOOL_CATEGORY_I18N = {
+  workbook: '工作簿',
+  'workbook/sheet': '工作簿/Sheet',
+  sheet: '工作表',
+  'sheet/range': '区域',
+  'sheet/rows-cols': '行列',
+  'sheet/merge': '合并',
+  'sheet/sort': '排序',
+  'sheet/insert': '插入',
+  'sheet/drawing': '图形',
+  cell: '单元格',
+  'cell/read': '单元格/读取',
+  'cell/value': '单元格/值',
+  'cell/style': '单元格/样式',
+  'cell/feature': '单元格/功能',
+  row: '行',
+  'row/read': '行/读取',
+  'row/style': '行/样式',
+  drawing: '图形',
+  'drawing/read': '图形/读取',
+  'drawing/write': '图形/更新',
+  'drawing/layer': '图形/图层',
+  layout: '布局',
+  'layout/read': '布局/读取',
+  'layout/write': '布局/设置',
+  utils: '工具方法',
+  'utils/convert': '工具方法/坐标转换',
+  'utils/ui': '工具方法/UI',
+  history: '历史记录',
+};
 
 const TOOL_I18N = {
   sheet_add_sheet: { label: '新建工作表', desc: '在当前工作簿中新增一个工作表（sheet tab）。' },
   sheet_set_range_values: { label: '写入单元格/区域', desc: '向指定范围写入二维数组（可用于批量生成表格）。' },
   sheet_get_range_values: { label: '读取单元格/区域', desc: '读取指定范围的值（二维数组）。' },
   sheet_format_range: { label: '设置格式', desc: '对指定范围应用基础格式（粗体/背景色/对齐/数字格式）。' },
+
+  // Workbook-level tools
+  workbook_get_info: { label: '工作簿信息', desc: '获取工作簿基础信息快照（名称/namespace/锁定状态/活动表/工作表列表）。' },
+  workbook_add_sheet: { label: '工作簿：新增工作表', desc: '新增工作表（名称可选，未填则自动生成 Sheet1/Sheet2...）。' },
+  workbook_del_sheet: { label: '工作簿：删除工作表', desc: '按名称删除工作表（至少保留一个可见工作表）。' },
+  workbook_get_sheet_by_name: { label: '工作簿：按名称取表', desc: '按名称获取工作表信息（返回可序列化快照）。' },
+  workbook_get_visible_sheet_by_index: { label: '工作簿：按可见索引取表', desc: '按可见索引（0-based，不计隐藏表）获取工作表信息快照。' },
+  workbook_rerender: { label: '工作簿：手动刷新渲染', desc: '手动触发画布重新渲染（批量修改后使用）。' },
+  workbook_get_data: { label: '工作簿：获取数据', desc: '获取完整工作簿 JSON 数据（用于备份/持久化/跨系统传输）。' },
+  workbook_set_data: { label: '工作簿：加载数据', desc: '用 JSON 数据替换当前工作簿内容（setData）。' },
+  workbook_import_from_url: { label: '工作簿：从 URL 导入', desc: '从在线地址导入 .xlsx 文件（importFromUrl）。' },
+  workbook_export: { label: '工作簿：导出文件', desc: '导出为 XLSX/CSV/JSON（浏览器环境通常会触发下载）。' },
+
+  // Sheet-level tools
+  sheet_get_info: { label: '工作表信息', desc: '获取工作表（Sheet）核心属性快照（行列数/冻结/合并/选区等）。' },
+  sheet_show_all_hid_rows: { label: '显示隐藏行', desc: '显示当前工作表所有隐藏的行。' },
+  sheet_show_all_hid_cols: { label: '显示隐藏列', desc: '显示当前工作表所有隐藏的列。' },
+  sheet_add_rows: { label: '插入行', desc: '在指定位置插入行（startR 0-based）。' },
+  sheet_add_cols: { label: '插入列', desc: '在指定位置插入列（startC 0-based）。' },
+  sheet_del_rows: { label: '删除行', desc: '从指定位置开始删除行（startR 0-based）。' },
+  sheet_del_cols: { label: '删除列', desc: '从指定位置开始删除列（startC 0-based）。' },
+  sheet_merge_cells: { label: '合并单元格', desc: '合并指定区域（例如 A1:C3）。' },
+  sheet_unmerge_cells: { label: '取消合并', desc: '取消指定单元格所在的合并区域（例如 A1）。' },
+  sheet_range_sort: { label: '区域排序', desc: '对指定区域进行排序（支持按列/行/自定义顺序）。' },
+  sheet_insert_table: { label: '批量插入表格', desc: '使用 insertTable 在指定位置批量生成表格/模板（支持样式/合并）。' },
+  sheet_add_drawing: { label: '添加图形对象', desc: '添加图形对象（图表/图片等）。' },
+  sheet_get_drawings_by_cell: { label: '获取单元格图形对象', desc: '获取指定单元格位置的图形对象列表。' },
+  sheet_remove_drawing: { label: '删除图形对象', desc: '按 id 删除图形对象。' },
+
+  // Cell-level tools
+  cell_get: { label: '读取单元格信息', desc: '读取单个单元格的值/类型/公式/合并信息/样式/验证等快照。' },
+  cell_set_edit_val: { label: '设置单元格值/公式', desc: '写入 cell.editVal（可直接写公式，如 "=SUM(A1:A3)"）。' },
+  cell_set_font: { label: '设置字体', desc: '设置 cell.font 字体样式（名称/字号/粗体/颜色/下划线等）。' },
+  cell_set_alignment: { label: '设置对齐', desc: '设置 cell.alignment 对齐方式（水平/垂直/自动换行/缩进等）。' },
+  cell_set_border: { label: '设置边框', desc: '设置 cell.border 边框样式（上下左右/对角线），{} 清空。' },
+  cell_set_fill: { label: '设置填充', desc: '设置 cell.fill 填充（纯色/渐变），{} 清空。' },
+  cell_set_num_fmt: { label: '设置数字格式', desc: '设置 cell.numFmt 数字/日期/货币格式，null 清空。' },
+  cell_set_hyperlink: { label: '设置超链接', desc: '设置 cell.hyperlink（外链 target 或内链 location），{} 移除。' },
+  cell_set_data_validation: { label: '设置数据验证', desc: '设置 cell.dataValidation（下拉列表/范围/自定义等），{} 移除。' },
+
+  // Row-level tools
+  row_get: { label: '读取行信息', desc: '读取行的高度/隐藏状态/索引及行级样式（numFmt/font/alignment/border/fill）。' },
+  row_set_height: { label: '设置行高', desc: '设置 row.height（像素）。' },
+  row_set_hidden: { label: '隐藏/显示行', desc: '设置 row.hidden（true 隐藏 / false 显示）。' },
+  row_set_num_fmt: { label: '设置行数字格式', desc: '设置 row.numFmt 数字格式，null 清空。' },
+  row_set_font: { label: '设置行字体', desc: '设置 row.font 字体样式（行级）。' },
+  row_set_alignment: { label: '设置行对齐', desc: '设置 row.alignment 对齐方式（行级）。' },
+  row_set_border: { label: '设置行边框', desc: '设置 row.border 边框样式（行级），{} 清空。' },
+  row_set_fill: { label: '设置行填充', desc: '设置 row.fill 填充样式（行级），{} 清空。' },
+  row_get_cell: { label: '按行获取单元格', desc: '通过 row.getCell(col) 获取该行某列单元格的快照。' },
+
+  // Drawing-level tools
+  drawing_get: { label: '读取图形对象', desc: '按 id 读取 Drawing（图表/图片/形状等）的快照信息。' },
+  drawing_update: { label: '更新图形对象', desc: '按 id 更新 Drawing 属性（位置/大小/锚点/样式/文本/图表 option 等）。' },
+  drawing_upd_index: { label: '调整图形图层顺序', desc: '调用 drawing.updIndex(direction) 调整层级：up/down/top/bottom。' },
+
+  // Layout-level tools
+  layout_get: { label: '读取布局状态', desc: '读取 SN.Layout 的菜单栏/工具栏/公式栏/Sheet标签栏/AI聊天等显示状态与 menuConfig。' },
+  layout_set: { label: '设置布局显示', desc: '设置 SN.Layout 的 showMenuBar/showToolbar/showFormulaBar/showSheetTabBar/showAIChat/showAIChatWindow。只修改传入字段。' },
+
+  // Utils
+  utils_num_to_char: { label: '数字转列标', desc: 'SN.Utils.numToChar(num)：0->A, 25->Z, 26->AA。' },
+  utils_char_to_num: { label: '列标转数字', desc: 'SN.Utils.charToNum(char)：A->0, Z->25, AA->26。' },
+  utils_range_num_to_str: { label: '范围对象转字符串', desc: 'SN.Utils.rangeNumToStr({s:{r,c},e:{r,c}})：例如 A1:C3。' },
+  utils_cell_str_to_num: { label: '单元格字符串转数字对象', desc: 'SN.Utils.cellStrToNum("A1") -> {r:0,c:0}。' },
+  utils_cell_num_to_str: { label: '单元格数字对象转字符串', desc: 'SN.Utils.cellNumToStr({r:0,c:0}) -> "A1"。' },
+  utils_msg: { label: '消息提示', desc: 'SN.Utils.msg("...")：显示 3 秒后自动消失的提示。' },
+  utils_modal: { label: '模态弹窗', desc: 'SN.Utils.modal(options)：显示弹窗，确定 resolve、取消 reject（工具会 await 并返回 confirmed/canceled）。' },
+
+  // History
+  history_undo: { label: '撤销', desc: 'SN.UndoRedo.undo()：撤销上一步操作。' },
+  history_redo: { label: '重做', desc: 'SN.UndoRedo.redo()：重做上一步操作。' },
 };
 
 const sheetToolDefinitions = computed(() => {
@@ -588,39 +758,45 @@ const sheetToolDefinitions = computed(() => {
       const name = t?.function?.name;
       if (!name) return null;
       const meta = TOOL_I18N[name] || { label: name, desc: t?.function?.description || '' };
-      return { name, label: meta.label, desc: meta.desc };
+      const category = t?.xCategory || t?.category || 'other';
+      return { name, label: meta.label, desc: meta.desc, category };
     })
     .filter(Boolean);
 });
 
-const _loadedToolSettings = loadToolSettings();
-toolsEnableAll.value = _loadedToolSettings.enableAll;
+const filteredToolDefinitions = computed(() => {
+  const q = String(toolSearch.value || '').trim().toLowerCase();
+  const defs = sheetToolDefinitions.value || [];
+  if (!q) return defs;
+  return defs.filter((d) => {
+    return (
+      String(d.name).toLowerCase().includes(q) ||
+      String(d.label).toLowerCase().includes(q) ||
+      String(d.desc).toLowerCase().includes(q) ||
+      String(d.category || '').toLowerCase().includes(q)
+    );
+  });
+});
 
-watch(
-  () => sheetToolDefinitions.value,
-  (defs) => {
-    if (!defs?.length) return;
-    if (!toolsEnableAll.value && _loadedToolSettings.enabledToolNames?.length) {
-      selectedToolNames.value = [..._loadedToolSettings.enabledToolNames];
-    }
-    if (!selectedToolNames.value.length) selectedToolNames.value = defs.map((d) => d.name);
-  },
-  { immediate: true },
-);
-watch(
-  () => toolsEnableAll.value,
-  () => saveToolSettings({ enableAll: toolsEnableAll.value, enabledToolNames: selectedToolNames.value }),
-);
-watch(
-  () => selectedToolNames.value,
-  () => {
-    if (!toolsEnableAll.value) saveToolSettings({ enableAll: false, enabledToolNames: selectedToolNames.value });
-  },
-  { deep: true },
-);
+const groupedToolDefinitions = computed(() => {
+  const defs = filteredToolDefinitions.value || [];
+  const groups = new Map();
+  for (const d of defs) {
+    const cat = d.category || 'other';
+    if (!groups.has(cat)) groups.set(cat, []);
+    groups.get(cat).push(d);
+  }
+  const out = Array.from(groups.entries()).map(([category, items]) => ({
+    category,
+    label: TOOL_CATEGORY_I18N[category] || category,
+    items: items.sort((a, b) => String(a.label).localeCompare(String(b.label))),
+  }));
+  out.sort((a, b) => String(a.label).localeCompare(String(b.label)));
+  return out;
+});
 
 function selectAllTools() {
-  selectedToolNames.value = sheetToolDefinitions.value.map((d) => d.name);
+  selectedToolNames.value = filteredToolDefinitions.value.map((d) => d.name);
 }
 function clearAllTools() {
   selectedToolNames.value = [];
@@ -681,96 +857,68 @@ async function newConversation() {
   clear();
 }
 
-// ---------- Sheet tool executor (local, MVP) ----------
-function getActiveSheet() {
-  const s = props.sheet?.activeSheet;
-  return s || null;
-}
-
-function getSheetByName(name) {
-  const wb = props.sheet;
-  if (!wb) return null;
-  const sheets = wb.sheets || wb?.workbook?.sheets;
-  if (Array.isArray(sheets)) return sheets.find((s) => s?.name === name) || null;
-  if (typeof wb.getSheetByName === 'function') return wb.getSheetByName(name);
-  return null;
-}
-
+// ---------- Sheet tool executor (use unified executor) ----------
 async function runSheetToolCall(call) {
-  const fn = call?.function;
-  const name = fn?.name;
-  const args = typeof fn?.arguments === 'string' ? JSON.parse(fn.arguments || '{}') : (fn?.arguments || {});
-  const sheet = args.sheet ? getSheetByName(args.sheet) : getActiveSheet();
-  if (!sheet) throw new Error('SheetNext 未就绪或没有活动工作表');
+  // Delegate to the shared executor so ALL tools defined in sheetTools.js are supported.
+  const toolName = call?.function?.name || call?.name;
 
-  if (name === 'sheet_add_sheet') {
-    const newName = String(args.name || '').trim();
-    if (!newName) throw new Error('name required');
-    if (typeof props.sheet?.addSheet === 'function') {
-      props.sheet.addSheet(newName);
-      return { ok: true, name: newName };
+  // If locked, force all sheet-scoped ops to run on current active sheet + anchor cell.
+  if (lockToActiveSheet.value) {
+    // Do not allow creating new sheets in locked mode.
+    if (toolName === 'sheet_add_sheet' || toolName === 'workbook_add_sheet') {
+      return { ok: false, error: 'Locked to current sheet: creating new sheets is disabled in this conversation.', tool: toolName };
     }
-    throw new Error('当前 SheetNext 实例不支持 addSheet');
+
+    // Inject/override args
+    const rawArgs = call?.function?.arguments ?? call?.arguments ?? {};
+    const args = typeof rawArgs === 'string' ? JSON.parse(rawArgs) : (rawArgs || {});
+    if (targetSheetName.value) args.sheet = targetSheetName.value;
+
+    // For range writes, prefer startCell = current anchor.
+    if (toolName === 'sheet_set_range_values' && !args.range) {
+      args.startCell = args.startCell || anchorCell.value || 'A1';
+    }
+    if (toolName === 'sheet_insert_table') {
+      args.startCell = args.startCell || anchorCell.value || 'A1';
+    }
+
+    // For drawings, set startCell to anchor if missing.
+    if (toolName === 'sheet_add_drawing') {
+      args.config = args.config || {};
+      if (!args.config.startCell) args.config.startCell = anchorCell.value || 'A1';
+    }
+
+    // For sheet_get_info, do not force a named sheet; we want current active selection.
+    if (toolName === 'sheet_get_info') {
+      delete args.sheet;
+    }
+
+    const patched = {
+      ...call,
+      function: call.function
+        ? {
+            ...call.function,
+            arguments: JSON.stringify(args),
+          }
+        : undefined,
+      arguments: call.function ? undefined : args,
+    };
+
+    return await executeSheetToolCall(props.sheet, patched);
   }
 
-  if (name === 'sheet_set_range_values') {
-    const values = args.values;
-    const startCell = args.startCell || args.range;
-    if (!Array.isArray(values) || !startCell) throw new Error('values + (startCell|range) required');
-    if (typeof sheet.insertTable === 'function') {
-      sheet.insertTable(values, startCell, { border: true });
-      return { ok: true };
-    }
-    // fallback: set cell-by-cell
-    if (typeof sheet.rangeStrToNum === 'function' && typeof sheet.getCell === 'function') {
-      const rangeNum = sheet.rangeStrToNum(String(startCell));
-      const r0 = rangeNum?.s?.r ?? 0;
-      const c0 = rangeNum?.s?.c ?? 0;
-      for (let r = 0; r < values.length; r++) {
-        for (let c = 0; c < (values[r] || []).length; c++) {
-          const cell = sheet.getCell(r0 + r, c0 + c);
-          if (cell) cell.v = values[r][c];
-        }
-      }
-      return { ok: true };
-    }
-    throw new Error('当前 Sheet 对象不支持写入');
-  }
-
-  if (name === 'sheet_get_range_values') {
-    const range = String(args.range || '');
-    if (!range) throw new Error('range required');
-    if (typeof sheet.eachArea === 'function' && typeof sheet.getCell === 'function') {
-      const rn = sheet.rangeStrToNum(range);
-      const out = [];
-      for (let r = rn.s.r; r <= rn.e.r; r++) {
-        const row = [];
-        for (let c = rn.s.c; c <= rn.e.c; c++) {
-          const cell = sheet.getCell(r, c);
-          row.push(cell?.v ?? cell?.showVal ?? '');
-        }
-        out.push(row);
-      }
-      return { values: out };
-    }
-    return { values: [] };
-  }
-
-  if (name === 'sheet_format_range') {
-    // MVP: formatting not implemented in this minimal restore
-    return { ok: true, note: 'format not implemented in MVP' };
-  }
-
-  throw new Error(`unknown tool: ${name}`);
+  const result = await executeSheetToolCall(props.sheet, call);
+  return result;
 }
 
-function pushSystem(content) {
+async function pushSystem(content) {
   messages.value.push({
     id: crypto.randomUUID?.() ?? String(Date.now()),
     role: 'system',
     createdAt: Date.now(),
     content,
   });
+  await scrollToBottom();
 }
 
 function toolDisplayName(toolName) {
@@ -796,15 +944,25 @@ async function send() {
   const content = draft.value.trim();
   if (!content) return;
 
+  // 每次发送前，同步一次当前选区作为锚点（避免默认 A1）
+  await refreshAnchorFromSelection();
+
   messages.value.push({ id: crypto.randomUUID?.() ?? String(Date.now()), role: 'user', createdAt: Date.now(), content });
   draft.value = '';
+  await scrollToBottom();
 
   const assistantId = crypto.randomUUID?.() ?? String(Date.now() + 1);
   messages.value.push({ id: assistantId, role: 'assistant', createdAt: Date.now(), content: '思考中…' });
+  await scrollToBottom();
 
   const selected = llmConfigs.value.find((c) => c.id === activeConfigId.value);
   if (!selected) {
-    messages.value.push({ id: crypto.randomUUID?.() ?? String(Date.now() + 2), role: 'system', createdAt: Date.now(), content: '请先在设置->模型设置里创建/选择模型配置。' });
+    messages.value.push({
+      id: crypto.randomUUID?.() ?? String(Date.now() + 2),
+      role: 'system',
+      createdAt: Date.now(),
+      content: '请先在设置->模型设置里创建/选择模型配置。',
+    });
     return;
   }
 
@@ -832,33 +990,35 @@ async function send() {
   try {
     requesting.value = true;
 
-    // Always try stream first for better UX.
-    const idx0 = messages.value.findIndex((m) => m.id === assistantId);
-    if (idx0 >= 0) messages.value[idx0] = { ...messages.value[idx0], content: '' };
-
-    // 提问：纯流式，不带 tools
-    if (mode.value === '提问') {
-      let full = '';
-      await chatCompletionStream({
-        provider,
-        config: providerCfg,
-        messages: baseMessages,
-        signal: undefined,
-        onDelta: (d) => {
-          full += d;
-          const idx = messages.value.findIndex((m) => m.id === assistantId);
-          if (idx >= 0) messages.value[idx] = { ...messages.value[idx], content: full };
-        },
-      });
-      return;
-    }
-
     // tool loop (max 5)
     let loopMessages = [...baseMessages];
     let finalText = '';
     let didRunTools = false;
 
-    pushSystem('编辑模式：正在分析是否需要调用工具…');
+    // 在编辑模式下：先注入当前 sheet 的上下文（默认限制 50x26，避免 prompt 过大）
+    if (mode.value === '编辑' && includeSheetContext.value) {
+      try {
+        const ctx = await executeSheetToolCall(props.sheet, {
+          function: {
+            name: 'sheet_export_sheet_context',
+            arguments: JSON.stringify({
+              sheet: targetSheetName.value || undefined,
+              maxRows: 50,
+              maxCols: 26,
+              withStyles: true,
+            }),
+          },
+        });
+        loopMessages.push({
+          role: 'system',
+          content: '当前工作表上下文（用于后续编辑决策，注意有尺寸限制）：\n' + JSON.stringify(ctx, null, 2),
+        });
+      } catch {
+        // ignore context failures
+      }
+    }
+
+    await pushSystem('编辑模式：正在分析是否需要调用工具…');
 
     for (let i = 0; i < 5; i++) {
       const resp = await chatCompletion({
@@ -883,11 +1043,13 @@ async function send() {
             full += d;
             const idx = messages.value.findIndex((m) => m.id === assistantId);
             if (idx >= 0) messages.value[idx] = { ...messages.value[idx], content: full };
+            scrollToBottom();
           },
         }).catch(() => {
           // fallback to non-stream text
           const idx = messages.value.findIndex((m) => m.id === assistantId);
           if (idx >= 0) messages.value[idx] = { ...messages.value[idx], content: finalText || '' };
+          scrollToBottom();
         });
         return;
       }
@@ -896,37 +1058,34 @@ async function send() {
       loopMessages.push({ role: 'assistant', content: resp.content || '', tool_calls: resp.toolCalls });
 
       didRunTools = true;
-      pushSystem(`检测到工具调用：${resp.toolCalls.length} 个，开始执行…`);
+      await pushSystem(`检测到工具调用：${resp.toolCalls.length} 个，开始执行…`);
 
       for (const tc of resp.toolCalls) {
         const toolName = tc?.function?.name || '(unknown)';
-        pushSystem(`→ 执行工具：${toolDisplayName(toolName)}`);
+        await pushSystem(`→ 执行工具：${toolDisplayName(toolName)}`);
         const result = await runSheetToolCall(tc);
-        pushSystem(`✓ 工具完成：${toolDisplayName(toolName)}`);
+        await pushSystem(`✓ 工具完成：${toolDisplayName(toolName)}`);
         loopMessages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify(result) });
       }
 
-      // After tool writes, wait for SheetNext to paint before continuing.
       await waitSheetRendered();
+      await scrollToBottom();
     }
 
     if (didRunTools) {
-      pushSystem('表格更新中…（等待渲染完成）');
+      await pushSystem('表格更新中…（等待渲染完成）');
       await waitSheetRendered();
-      pushSystem('表格已更新并渲染完成。');
+      await pushSystem('表格已更新并渲染完成。');
     }
 
     const idx = messages.value.findIndex((m) => m.id === assistantId);
     if (idx >= 0) messages.value[idx] = { ...messages.value[idx], content: finalText || '' };
-   } catch (e) {
-     const idx = messages.value.findIndex((m) => m.id === assistantId);
-     if (idx >= 0) messages.value[idx] = { ...messages.value[idx], role: 'system', content: `请求失败：${e?.message ?? String(e)}` };
-   } finally {
-     requesting.value = false;
-     await nextTick();
-     bottomRef.value?.scrollIntoView?.({ block: 'end' });
-   }
- }
+    await scrollToBottom();
+  } finally {
+    requesting.value = false;
+    await scrollToBottom();
+  }
+}
 
 onMounted(() => {
   refreshConfigs();
@@ -1152,5 +1311,10 @@ onMounted(() => {
 
 .settings__main {
   padding-right: 4px;
+}
+
+.tool-list {
+  max-height: 400px;
+  overflow-y: auto;
 }
 </style>
